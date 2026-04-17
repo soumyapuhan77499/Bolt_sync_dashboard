@@ -39,18 +39,10 @@ Route::prefix('admin')->name('admin.')->group(function () {
         Route::get('/replication/status', [ReplicationController::class, 'status'])->name('replication.status');
 
         Route::get('/sync-jobs', [SyncJobController::class, 'index'])->name('sync-jobs.index');
-        Route::post('/sync-jobs/run', [SyncJobController::class, 'run'])->name('sync-jobs.run');
 
         Route::get('/backup', [BackupController::class, 'index'])->name('backup.index');
-        Route::post('/backup/create', [BackupController::class, 'create'])->name('backup.create');
-        Route::post('/backup/restore', [BackupController::class, 'restore'])->name('backup.restore');
-
         Route::get('/health', [HealthController::class, 'index'])->name('health.index');
-        Route::post('/health/check', [HealthController::class, 'runCheck'])->name('health.check');
-
-        Route::get('/audit-logs', [AuditLogController::class, 'index'])->name('audit.index');
-
+        Route::get('/audit-logs', [AuditLogController::class, 'index'])->name('audit-logs.index');
         Route::get('/settings', [SettingController::class, 'index'])->name('settings.index');
-        Route::post('/settings/update', [SettingController::class, 'update'])->name('settings.update');
     });
 });

@@ -8,12 +8,9 @@ use Symfony\Component\HttpFoundation\Response;
 
 class AdminAuth
 {
-    /**
-     * Handle an incoming request.
-     */
     public function handle(Request $request, Closure $next): Response
     {
-        if (! session()->get('admin_logged_in')) {
+        if (!$request->session()->has('admin_id')) {
             return redirect()
                 ->route('admin.login')
                 ->with('error', 'Please login to continue.');

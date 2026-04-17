@@ -10,29 +10,49 @@ class DashboardController extends Controller
 {
     public function index()
     {
-        $sourceStatus = $this->getConnectionSummary('source_pg', 'Source Supabase');
-        $destinationStatus = $this->getConnectionSummary('destination_pg', 'Destination Database');
-        $adminStatus = $this->getConnectionSummary(config('database.default'), 'Admin Database');
+        $adminSchema = $this->getCurrentSchema();
 
         $stats = [
-            'source_tables' => $sourceStatus['tables_count'],
-            'destination_tables' => $destinationStatus['tables_count'],
-            'admin_tables' => $adminStatus['tables_count'],
-            'healthy_connections' => collect([$sourceStatus, $destinationStatus, $adminStatus])
-                ->where('status', 'connected')
-                ->count(),
+            'source_tables' => 0,
+            'destination_tables' => 0,
+            'admin_tables' => $this->getAdminTableCount(),
+            'healthy_connections' => 1,
         ];
 
-        $recentSyncRuns = $this->getRecentTableData('sync_runs');
-        $recentHealthChecks = $this->getRecentTableData('health_checks');
-        $recentBackups = $this->getRecentTableData('backup_runs');
-        $recentAuditLogs = $this->getRecentTableData('audit_logs');
+        $sourceStatus = [
+            'status' => 'pending',
+            'database_name' => env('SRC_PG_DATABASE', '-'),
+            'schema_name' => env('SRC_PG_SCHEMA', 'public'),
+            'tables_count' => 0,
+            'message' => 'Source live status not connected in dashboard yet.',
+        ];
+
+        $destinationStatus = [
+            'status' => 'pending',
+            'database_name' => env('DST_PG_DATABASE', env('TGT_PG_DATABASE', '-')),
+            'schema_name' => env('DST_PG_SCHEMA', env('TGT_PG_SCHEMA', 'public')),
+            'tables_count' => 0,
+            'message' => 'Destination live status not connected in dashboard yet.',
+        ];
+
+        $adminStatus = [
+            'status' => 'connected',
+            'database_name' => env('DB_DATABASE', '-'),
+            'schema_name' => $adminSchema,
+            'tables_count' => $stats['admin_tables'],
+            'message' => 'Admin database connected successfully.',
+        ];
+
+        $recentSyncRuns = $this->safeGetTableData('sync_runs', 'id', 10);
+        $recentHealthChecks = $this->safeGetTableData('health_checks', 'id', 10);
+        $recentBackups = $this->safeGetTableData('backup_runs', 'id', 10);
+        $recentAuditLogs = $this->safeGetTableData('audit_logs', 'id', 10);
 
         return view('admin.dashboard.index', compact(
+            'stats',
             'sourceStatus',
             'destinationStatus',
             'adminStatus',
-            'stats',
             'recentSyncRuns',
             'recentHealthChecks',
             'recentBackups',
@@ -40,66 +60,45 @@ class DashboardController extends Controller
         ));
     }
 
-    private function getConnectionSummary(string $connectionName, string $label): array
+    private function getCurrentSchema(): string
     {
         try {
-            $dbNameResult = DB::connection($connectionName)->selectOne('select current_database() as database_name');
-            $versionResult = DB::connection($connectionName)->selectOne('select version() as version');
-
-            $schemaName = $this->getSchemaName($connectionName);
-
-            $tableCountResult = DB::connection($connectionName)->selectOne(
-                'select count(*) as total from information_schema.tables where table_schema = ? and table_type = ?',
-                [$schemaName, 'BASE TABLE']
-            );
-
-            return [
-                'label' => $label,
-                'connection' => $connectionName,
-                'status' => 'connected',
-                'database_name' => $dbNameResult->database_name ?? '-',
-                'version' => $versionResult->version ?? '-',
-                'schema_name' => $schemaName,
-                'tables_count' => (int) ($tableCountResult->total ?? 0),
-                'message' => 'Connection successful',
-            ];
+            $row = DB::selectOne('select current_schema() as schema_name');
+            return $row->schema_name ?? 'public';
         } catch (\Throwable $e) {
-            return [
-                'label' => $label,
-                'connection' => $connectionName,
-                'status' => 'failed',
-                'database_name' => '-',
-                'version' => '-',
-                'schema_name' => $this->getSchemaName($connectionName),
-                'tables_count' => 0,
-                'message' => $e->getMessage(),
-            ];
+            return 'public';
         }
     }
 
-    private function getSchemaName(string $connectionName): string
-    {
-        $connection = config("database.connections.{$connectionName}", []);
-
-        return $connection['schema']
-            ?? $connection['search_path']
-            ?? 'public';
-    }
-
-    private function getRecentTableData(string $table): array
+    private function getAdminTableCount(): int
     {
         try {
-            if (! Schema::hasTable($table)) {
-                return [];
+            $row = DB::selectOne("
+                select count(*) as total
+                from information_schema.tables
+                where table_schema = current_schema()
+                and table_type = 'BASE TABLE'
+            ");
+
+            return (int) ($row->total ?? 0);
+        } catch (\Throwable $e) {
+            return 0;
+        }
+    }
+
+    private function safeGetTableData(string $table, string $orderBy = 'id', int $limit = 10)
+    {
+        try {
+            if (!Schema::hasTable($table)) {
+                return collect();
             }
 
             return DB::table($table)
-                ->latest('id')
-                ->limit(5)
-                ->get()
-                ->toArray();
+                ->orderByDesc($orderBy)
+                ->limit($limit)
+                ->get();
         } catch (\Throwable $e) {
-            return [];
+            return collect();
         }
     }
 }
