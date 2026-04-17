@@ -11,24 +11,18 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('sync_runs', function (Blueprint $table) {
+        Schema::create('backup_runs', function (Blueprint $table) {
             $table->id();
-            $table->string('module_name', 100);   // schema / replication / backup / manual_sync
-            $table->string('run_type', 50);       // manual / scheduled / health / snapshot
+            $table->string('backup_type', 50); // full / schema / data
+            $table->string('file_name', 255)->nullable();
+            $table->string('file_path', 500)->nullable();
             $table->string('status', 30)->default('pending'); // pending / running / success / failed
-            $table->longText('summary')->nullable();
+            $table->text('notes')->nullable();
             $table->timestamp('started_at')->nullable();
             $table->timestamp('ended_at')->nullable();
-            $table->unsignedBigInteger('created_by')->nullable();
             $table->timestamps();
 
-            $table->foreign('created_by')
-                ->references('id')
-                ->on('admin_users')
-                ->nullOnDelete();
-
-            $table->index('module_name');
-            $table->index('run_type');
+            $table->index('backup_type');
             $table->index('status');
             $table->index('started_at');
         });
@@ -39,6 +33,6 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::dropIfExists('sync_runs');
+        Schema::dropIfExists('backup_runs');
     }
 };
