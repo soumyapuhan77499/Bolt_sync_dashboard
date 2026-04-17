@@ -19,64 +19,46 @@ class AuthController extends Controller
         return view('admin.auth.login');
     }
 
-    public function login(Request $request)
-    {
-        $validated = $request->validate([
-            'email' => ['required', 'email'],
-            'password' => ['required', 'string'],
-        ]);
+   public function login(Request $request)
+{
+    $request->validate([
+        'email' => 'required|email',
+        'password' => 'required|string',
+    ], [
+        'email.required' => 'Email is required',
+        'email.email' => 'Enter a valid email address',
+        'password.required' => 'Password is required',
+    ]);
 
-        if (! Schema::hasTable('admin_users')) {
-            return back()
-                ->withInput($request->only('email'))
-                ->with('error', 'admin_users table not found. Please run migrations first.');
-        }
+    $admin = AdminUser::where('email', $request->email)
+        ->where('status', 'active')
+        ->first();
 
-        $admin = DB::table('admin_users')
-            ->where('email', $validated['email'])
-            ->first();
-
-        if (! $admin) {
-            return back()
-                ->withInput($request->only('email'))
-                ->with('error', 'Invalid email or password.');
-        }
-
-        if (isset($admin->status) && $admin->status !== 'active') {
-            return back()
-                ->withInput($request->only('email'))
-                ->with('error', 'Your account is inactive.');
-        }
-
-        if (! Hash::check($validated['password'], $admin->password)) {
-            return back()
-                ->withInput($request->only('email'))
-                ->with('error', 'Invalid email or password.');
-        }
-
-        try {
-            DB::table('admin_users')
-                ->where('id', $admin->id)
-                ->update([
-                    'last_login_at' => now(),
-                    'updated_at' => now(),
-                ]);
-        } catch (\Throwable $e) {
-            // Ignore if columns do not exist yet
-        }
-
-        session([
-            'admin_logged_in' => true,
-            'admin_user_id' => $admin->id,
-            'admin_name' => $admin->name ?? 'Admin',
-            'admin_email' => $admin->email,
-            'admin_role' => $admin->role ?? 'admin',
-        ]);
-
-        return redirect()
-            ->route('admin.dashboard')
-            ->with('success', 'Login successful.');
+    if (!$admin) {
+        return back()
+            ->with('error', 'Admin not found or inactive')
+            ->withInput();
     }
+
+    if (!Hash::check($request->password, $admin->password)) {
+        return back()
+            ->with('error', 'Invalid password')
+            ->withInput();
+    }
+
+    $request->session()->regenerate();
+
+    session([
+        'admin_id' => $admin->id,
+        'admin_name' => $admin->name,
+        'admin_user_id' => $admin->user_id,
+        'admin_email' => $admin->email,
+    ]);
+
+    return redirect()
+        ->route('admin.dashboard')
+        ->with('success', 'Login successful');
+}
 
     public function logout(Request $request)
     {
