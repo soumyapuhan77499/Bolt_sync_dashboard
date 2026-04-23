@@ -11,7 +11,7 @@ class AuthController extends Controller
 {
     public function showLogin()
     {
-        if (session()->has('admin_id')) {
+        if (session()->has('admin_logged_in')) {
             return redirect()->route('admin.dashboard');
         }
 
@@ -21,16 +21,20 @@ class AuthController extends Controller
     public function login(Request $request)
     {
         $request->validate([
-            'email' => 'required|email',
+            'login' => 'required|string',
             'password' => 'required|string',
         ], [
-            'email.required' => 'Email is required',
-            'email.email' => 'Enter a valid email address',
+            'login.required' => 'Email or User ID is required',
             'password.required' => 'Password is required',
         ]);
 
-        $admin = AdminUser::where('email', $request->email)
-            ->where('status', 'active')
+        $loginValue = trim($request->login);
+
+        $admin = AdminUser::where('status', 'active')
+            ->where(function ($query) use ($loginValue) {
+                $query->where('email', $loginValue)
+                      ->orWhere('user_id', $loginValue);
+            })
             ->first();
 
         if (!$admin) {
@@ -48,11 +52,12 @@ class AuthController extends Controller
         $request->session()->regenerate();
 
         session([
-            'admin_logged_in' => true,
-            'admin_id' => $admin->id,
-            'admin_name' => $admin->name,
-            'admin_user_id' => $admin->user_id,
-            'admin_email' => $admin->email,
+            'admin_logged_in'    => true,
+            'admin_id'           => $admin->id,
+            'admin_name'         => $admin->name,
+            'admin_user_id'      => $admin->user_id,
+            'admin_email'        => $admin->email,
+            'admin_is_super_admin' => (bool) $admin->is_super_admin,
         ]);
 
         return redirect()
@@ -68,6 +73,7 @@ class AuthController extends Controller
             'admin_name',
             'admin_user_id',
             'admin_email',
+            'admin_is_super_admin',
         ]);
 
         $request->session()->invalidate();

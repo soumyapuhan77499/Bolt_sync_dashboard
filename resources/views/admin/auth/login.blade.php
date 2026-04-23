@@ -1,85 +1,123 @@
-@extends('admin.layouts.app')
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Login - Bolt Sync Admin</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #f3f4f6;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
 
-@section('title', 'Admin Login - Bolt Sync Admin')
+        .login-box {
+            width: 100%;
+            max-width: 420px;
+            background: #fff;
+            border-radius: 16px;
+            padding: 28px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+        }
 
-@section('content')
-<div class="container py-5">
-    <div class="row justify-content-center align-items-center" style="min-height: 80vh;">
-        <div class="col-lg-10">
-            <div class="card border-0 shadow-lg rounded-4 overflow-hidden">
-                <div class="row g-0">
-                    <div class="col-md-6 text-white p-5" style="background: linear-gradient(135deg, #0b1b4d 0%, #1f3b8a 100%);">
-                        <span class="badge rounded-pill px-3 py-2 mb-4" style="background: rgba(255,255,255,0.12);">
-                            BOLT SYNC ADMIN
-                        </span>
+        h2 {
+            margin: 0 0 8px;
+            color: #111827;
+        }
 
-                        <h1 class="fw-bold mb-4" style="font-size: 3rem; line-height: 1.15;">
-                            Control database sync, schema diff, backups and replication from one dashboard.
-                        </h1>
+        p {
+            color: #6b7280;
+            margin-bottom: 20px;
+        }
 
-                        <p class="fs-5 opacity-75 mb-4">
-                            This admin panel is designed to manage Source Supabase and Destination Database connections with a clean operational workflow.
-                        </p>
-                    </div>
+        .form-group {
+            margin-bottom: 16px;
+        }
 
-                    <div class="col-md-6 bg-white p-5">
-                        <h2 class="fw-bold mb-2">Welcome back</h2>
-                        <p class="text-muted mb-4">Login with your admin account to continue.</p>
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #374151;
+        }
 
-                        @if(session('error'))
-                            <div class="alert alert-danger rounded-3">
-                                {{ session('error') }}
-                            </div>
-                        @endif
+        input {
+            width: 100%;
+            padding: 12px 14px;
+            border: 1px solid #d1d5db;
+            border-radius: 10px;
+            box-sizing: border-box;
+        }
 
-                        @if(session('success'))
-                            <div class="alert alert-success rounded-3">
-                                {{ session('success') }}
-                            </div>
-                        @endif
+        button {
+            width: 100%;
+            border: none;
+            background: #2563eb;
+            color: #fff;
+            padding: 12px 14px;
+            border-radius: 10px;
+            font-weight: 700;
+            cursor: pointer;
+        }
 
-                        @if ($errors->any())
-                            <div class="alert alert-danger rounded-3">
-                                {{ $errors->first() }}
-                            </div>
-                        @endif
+        .alert {
+            padding: 12px;
+            border-radius: 10px;
+            margin-bottom: 16px;
+            font-size: 14px;
+        }
 
-                        <form method="POST" action="{{ route('admin.login.submit') }}">
-                            @csrf
+        .alert-danger {
+            background: #fee2e2;
+            color: #991b1b;
+        }
 
-                            <div class="mb-3">
-                                <label for="email" class="form-label fw-semibold">Email Address</label>
-                                <input
-                                    type="email"
-                                    name="email"
-                                    id="email"
-                                    value="{{ old('email') }}"
-                                    class="form-control form-control-lg rounded-3"
-                                    placeholder="Enter admin email"
-                                    required
-                                >
-                            </div>
+        .alert-success {
+            background: #dcfce7;
+            color: #166534;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <h2>Bolt Sync Admin</h2>
+        <p>Login with email or user ID.</p>
 
-                            <div class="mb-4">
-                                <label for="password" class="form-label fw-semibold">Password</label>
-                                <input
-                                    type="password"
-                                    name="password"
-                                    id="password"
-                                    class="form-control form-control-lg rounded-3"
-                                    placeholder="Enter password"
-                                    required
-                                >
-                            </div>
+        @if(session('error'))
+            <div class="alert alert-danger">{{ session('error') }}</div>
+        @endif
 
-                            <button type="submit" class="btn btn-primary btn-lg w-100 rounded-3">
-                                Login to Dashboard
-                            </button>
-                        </form>
-                    </div>
-                </div>
+        @if(session('success'))
+            <div class="alert alert-success">{{ session('success') }}</div>
+        @endif
+
+        @if($errors->any())
+            <div class="alert alert-danger">
+                @foreach($errors->all() as $error)
+                    <div>{{ $error }}</div>
+                @endforeach
             </div>
-        </div>
+        @endif
+
+        <form method="POST" action="{{ route('admin.login.submit') }}">
+            @csrf
+
+            <div class="form-group">
+                <label for="login">Email or User ID</label>
+                <input type="text" name="login" id="login" value="{{ old('login') }}" required>
+            </div>
+
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" name="password" id="password" required>
+            </div>
+
+            <button type="submit">Login</button>
+        </form>
     </div>
-</div>
-@endsection
+</body>
+</html>

@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="{{ str_replace('_', '-', app()->getLocale()) }}">
+
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -172,7 +173,7 @@
         .brand-box {
             padding: 18px 16px;
             border-radius: 16px;
-            background: rgba(255,255,255,0.06);
+            background: rgba(255, 255, 255, 0.06);
             margin-bottom: 20px;
         }
 
@@ -266,6 +267,7 @@
 
     @stack('styles')
 </head>
+
 <body>
     <div class="admin-wrapper">
         <aside class="admin-sidebar" id="adminSidebar">
@@ -281,51 +283,86 @@
                     <div class="nav-title">Navigation</div>
 
                     <ul class="nav-menu">
-                        <li>
-                            <a href="{{ route('admin.dashboard') }}" class="{{ request()->routeIs('admin.dashboard') ? 'active' : '' }}">
-                                <span>Dashboard</span>
-                            </a>
-                        </li>
-                        <li>
-                            <a href="{{ route('admin.connections.index') }}" class="{{ request()->routeIs('admin.connections.*') ? 'active' : '' }}">
-                                <span>Connections</span>
-                            </a>
-                        </li>
-                        <li>
-                            <a href="{{ route('admin.schema.index') }}" class="{{ request()->routeIs('admin.schema.*') ? 'active' : '' }}">
-                                <span>Schema Diff</span>
-                            </a>
-                        </li>
-                        <li>
-                            <a href="{{ route('admin.replication.index') }}" class="{{ request()->routeIs('admin.replication.*') ? 'active' : '' }}">
-                                <span>Replication</span>
-                            </a>
-                        </li>
-                        <li>
-                            <a href="{{ route('admin.sync-jobs.index') }}" class="{{ request()->routeIs('admin.sync-jobs.*') ? 'active' : '' }}">
-                                <span>Manual Sync</span>
-                            </a>
-                        </li>
-                        <li>
-                            <a href="{{ route('admin.backup.index') }}" class="{{ request()->routeIs('admin.backup.*') ? 'active' : '' }}">
-                                <span>Backups</span>
-                            </a>
-                        </li>
-                        <li>
-                            <a href="{{ route('admin.health.index') }}" class="{{ request()->routeIs('admin.health.*') ? 'active' : '' }}">
-                                <span>Health</span>
-                            </a>
-                        </li>
-                        <li>
-                            <a href="{{ route('admin.audit.index') }}" class="{{ request()->routeIs('admin.audit.*') ? 'active' : '' }}">
-                                <span>Audit Logs</span>
-                            </a>
-                        </li>
-                        <li>
-                            <a href="{{ route('admin.settings.index') }}" class="{{ request()->routeIs('admin.settings.*') ? 'active' : '' }}">
-                                <span>Settings</span>
-                            </a>
-                        </li>
+                        @if (Route::has('admin.dashboard'))
+                            <li>
+                                <a href="{{ route('admin.dashboard') }}"
+                                    class="{{ request()->routeIs('admin.dashboard') ? 'active' : '' }}">
+                                    <span>Dashboard</span>
+                                </a>
+                            </li>
+                        @endif
+
+                        @if (Route::has('admin.connections.index'))
+                            <li>
+                                <a href="{{ route('admin.connections.index') }}"
+                                    class="{{ request()->routeIs('admin.connections.*') ? 'active' : '' }}">
+                                    <span>Connections</span>
+                                </a>
+                            </li>
+                        @endif
+
+                        @if (Route::has('admin.schema.index'))
+                            <li>
+                                <a href="{{ route('admin.schema.index') }}"
+                                    class="{{ request()->routeIs('admin.schema.*') ? 'active' : '' }}">
+                                    <span>Schema Diff</span>
+                                </a>
+                            </li>
+                        @endif
+
+                        @if (Route::has('admin.replication.index'))
+                            <li>
+                                <a href="{{ route('admin.replication.index') }}"
+                                    class="{{ request()->routeIs('admin.replication.*') ? 'active' : '' }}">
+                                    <span>Replication</span>
+                                </a>
+                            </li>
+                        @endif
+
+                        @if (Route::has('admin.sync-jobs.index'))
+                            <li>
+                                <a href="{{ route('admin.sync-jobs.index') }}"
+                                    class="{{ request()->routeIs('admin.sync-jobs.*') ? 'active' : '' }}">
+                                    <span>Manual Sync</span>
+                                </a>
+                            </li>
+                        @endif
+
+                        @if (Route::has('admin.backup.index'))
+                            <li>
+                                <a href="{{ route('admin.backup.index') }}"
+                                    class="{{ request()->routeIs('admin.backup.*') ? 'active' : '' }}">
+                                    <span>Backups</span>
+                                </a>
+                            </li>
+                        @endif
+
+                        @if (Route::has('admin.health.index'))
+                            <li>
+                                <a href="{{ route('admin.health.index') }}"
+                                    class="{{ request()->routeIs('admin.health.*') ? 'active' : '' }}">
+                                    <span>Health</span>
+                                </a>
+                            </li>
+                        @endif
+
+                        @if (Route::has('admin.audit.index'))
+                            <li>
+                                <a href="{{ route('admin.audit.index') }}"
+                                    class="{{ request()->routeIs('admin.audit.*') ? 'active' : '' }}">
+                                    <span>Audit Logs</span>
+                                </a>
+                            </li>
+                        @endif
+
+                        @if (Route::has('admin.settings.index'))
+                            <li>
+                                <a href="{{ route('admin.settings.index') }}"
+                                    class="{{ request()->routeIs('admin.settings.*') ? 'active' : '' }}">
+                                    <span>Settings</span>
+                                </a>
+                            </li>
+                        @endif
                     </ul>
 
                     <form method="POST" action="{{ route('admin.logout') }}" class="logout-form">
@@ -360,13 +397,13 @@
 
             <main class="admin-content">
                 <div class="flash-wrapper">
-                    @if(session('success'))
+                    @if (session('success'))
                         <div class="alert alert-success">
                             {{ session('success') }}
                         </div>
                     @endif
 
-                    @if(session('error'))
+                    @if (session('error'))
                         <div class="alert alert-danger">
                             {{ session('error') }}
                         </div>
@@ -394,7 +431,7 @@
         const adminSidebar = document.getElementById('adminSidebar');
 
         if (menuToggle && adminSidebar) {
-            menuToggle.addEventListener('click', function () {
+            menuToggle.addEventListener('click', function() {
                 adminSidebar.classList.toggle('open');
             });
         }
@@ -402,4 +439,5 @@
 
     @stack('scripts')
 </body>
+
 </html>

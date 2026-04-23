@@ -216,112 +216,55 @@
         </div>
     </div>
 
-    <div class="section-grid">
-        <div class="panel-card">
-            <h3>Source Supabase</h3>
-
+ <div class="section-grid">
+    <div class="panel-card">
+        <h3>Source Supabase Tables</h3>
+        @if(!empty($sourceStatus['tables']))
             <div class="detail-list">
-                <div class="detail-row">
-                    <span class="detail-label">Status</span>
-                    <span class="detail-value">
-                        <span class="status-badge {{ $statusClass($sourceStatus['status'] ?? '') }}">
-                            {{ $sourceStatus['status'] ?? '-' }}
-                        </span>
-                    </span>
-                </div>
-
-                <div class="detail-row">
-                    <span class="detail-label">Database</span>
-                    <span class="detail-value">{{ $sourceStatus['database_name'] ?? '-' }}</span>
-                </div>
-
-                <div class="detail-row">
-                    <span class="detail-label">Schema</span>
-                    <span class="detail-value">{{ $sourceStatus['schema_name'] ?? '-' }}</span>
-                </div>
-
-                <div class="detail-row">
-                    <span class="detail-label">Tables</span>
-                    <span class="detail-value">{{ $sourceStatus['tables_count'] ?? 0 }}</span>
-                </div>
-
-                <div class="detail-row">
-                    <span class="detail-label">Message</span>
-                    <span class="detail-value">{{ $sourceStatus['message'] ?? '-' }}</span>
-                </div>
+                @foreach($sourceStatus['tables'] as $table)
+                    <div class="detail-row">
+                        <span class="detail-label">{{ $loop->iteration }}</span>
+                        <span class="detail-value" style="text-align:left;">{{ $table }}</span>
+                    </div>
+                @endforeach
             </div>
-        </div>
-
-        <div class="panel-card">
-            <h3>Destination Database</h3>
-
-            <div class="detail-list">
-                <div class="detail-row">
-                    <span class="detail-label">Status</span>
-                    <span class="detail-value">
-                        <span class="status-badge {{ $statusClass($destinationStatus['status'] ?? '') }}">
-                            {{ $destinationStatus['status'] ?? '-' }}
-                        </span>
-                    </span>
-                </div>
-
-                <div class="detail-row">
-                    <span class="detail-label">Database</span>
-                    <span class="detail-value">{{ $destinationStatus['database_name'] ?? '-' }}</span>
-                </div>
-
-                <div class="detail-row">
-                    <span class="detail-label">Schema</span>
-                    <span class="detail-value">{{ $destinationStatus['schema_name'] ?? '-' }}</span>
-                </div>
-
-                <div class="detail-row">
-                    <span class="detail-label">Tables</span>
-                    <span class="detail-value">{{ $destinationStatus['tables_count'] ?? 0 }}</span>
-                </div>
-
-                <div class="detail-row">
-                    <span class="detail-label">Message</span>
-                    <span class="detail-value">{{ $destinationStatus['message'] ?? '-' }}</span>
-                </div>
-            </div>
-        </div>
-
-        <div class="panel-card">
-            <h3>Admin Database</h3>
-
-            <div class="detail-list">
-                <div class="detail-row">
-                    <span class="detail-label">Status</span>
-                    <span class="detail-value">
-                        <span class="status-badge {{ $statusClass($adminStatus['status'] ?? '') }}">
-                            {{ $adminStatus['status'] ?? '-' }}
-                        </span>
-                    </span>
-                </div>
-
-                <div class="detail-row">
-                    <span class="detail-label">Database</span>
-                    <span class="detail-value">{{ $adminStatus['database_name'] ?? '-' }}</span>
-                </div>
-
-                <div class="detail-row">
-                    <span class="detail-label">Schema</span>
-                    <span class="detail-value">{{ $adminStatus['schema_name'] ?? '-' }}</span>
-                </div>
-
-                <div class="detail-row">
-                    <span class="detail-label">Tables</span>
-                    <span class="detail-value">{{ $adminStatus['tables_count'] ?? 0 }}</span>
-                </div>
-
-                <div class="detail-row">
-                    <span class="detail-label">Message</span>
-                    <span class="detail-value">{{ $adminStatus['message'] ?? '-' }}</span>
-                </div>
-            </div>
-        </div>
+        @else
+            <div class="empty-box">No source tables found.</div>
+        @endif
     </div>
+
+    <div class="panel-card">
+        <h3>Destination Tables</h3>
+        @if(!empty($destinationStatus['tables']))
+            <div class="detail-list">
+                @foreach($destinationStatus['tables'] as $table)
+                    <div class="detail-row">
+                        <span class="detail-label">{{ $loop->iteration }}</span>
+                        <span class="detail-value" style="text-align:left;">{{ $table }}</span>
+                    </div>
+                @endforeach
+            </div>
+        @else
+            <div class="empty-box">No destination tables found.</div>
+        @endif
+    </div>
+
+    <div class="panel-card">
+        <h3>Admin Database Tables</h3>
+        @if(!empty($adminStatus['tables']))
+            <div class="detail-list">
+                @foreach($adminStatus['tables'] as $table)
+                    <div class="detail-row">
+                        <span class="detail-label">{{ $loop->iteration }}</span>
+                        <span class="detail-value" style="text-align:left;">{{ $table }}</span>
+                    </div>
+                @endforeach
+            </div>
+        @else
+            <div class="empty-box">No admin tables found.</div>
+        @endif
+    </div>
+</div>
 
     <div class="table-card">
         <h3>Recent Sync Runs</h3>
