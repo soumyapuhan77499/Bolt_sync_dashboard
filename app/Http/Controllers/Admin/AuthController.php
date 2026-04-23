@@ -18,53 +18,58 @@ class AuthController extends Controller
         return view('admin.auth.login');
     }
 
-    public function login(Request $request)
-    {
-        $request->validate([
-            'login' => 'required|string',
-            'password' => 'required|string',
-        ], [
-            'login.required' => 'Email or User ID is required',
-            'password.required' => 'Password is required',
-        ]);
+ public function login(Request $request)
+{
+    $request->validate([
+        'login' => 'required|string',
+        'password' => 'required|string',
+    ], [
+        'login.required' => 'Email or User ID is required',
+        'password.required' => 'Password is required',
+    ]);
 
-        $loginValue = trim($request->login);
+    $loginValue = trim($request->login);
 
-        $admin = AdminUser::where('status', 'active')
-            ->where(function ($query) use ($loginValue) {
-                $query->where('email', $loginValue)
-                      ->orWhere('user_id', $loginValue);
-            })
-            ->first();
+    $admin = AdminUser::where('status', 'active')
+        ->where(function ($query) use ($loginValue) {
+            $query->where('email', $loginValue)
+                  ->orWhere('user_id', $loginValue);
+        })
+        ->first();
 
-        if (!$admin) {
-            return back()
-                ->with('error', 'Admin not found or inactive')
-                ->withInput();
-        }
+    if (!$admin) {
+        return back()
+            ->with('error', 'Admin not found or inactive')
+            ->withInput();
+    }
 
+    try {
         if (!Hash::check($request->password, $admin->password)) {
             return back()
                 ->with('error', 'Invalid password')
                 ->withInput();
         }
-
-        $request->session()->regenerate();
-
-        session([
-            'admin_logged_in'    => true,
-            'admin_id'           => $admin->id,
-            'admin_name'         => $admin->name,
-            'admin_user_id'      => $admin->user_id,
-            'admin_email'        => $admin->email,
-            'admin_is_super_admin' => (bool) $admin->is_super_admin,
-        ]);
-
-        return redirect()
-            ->route('admin.dashboard')
-            ->with('success', 'Login successful');
+    } catch (\RuntimeException $e) {
+        return back()
+            ->with('error', 'Stored password hash is invalid. Please reset admin password.')
+            ->withInput();
     }
 
+    $request->session()->regenerate();
+
+    session([
+        'admin_logged_in'       => true,
+        'admin_id'              => $admin->id,
+        'admin_name'            => $admin->name,
+        'admin_user_id'         => $admin->user_id,
+        'admin_email'           => $admin->email,
+        'admin_is_super_admin'  => (bool) $admin->is_super_admin,
+    ]);
+
+    return redirect()
+        ->route('admin.dashboard')
+        ->with('success', 'Login successful');
+}
     public function logout(Request $request)
     {
         $request->session()->forget([
