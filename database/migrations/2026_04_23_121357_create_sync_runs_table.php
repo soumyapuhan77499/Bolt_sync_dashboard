@@ -6,37 +6,28 @@ use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
-    /**
-     * Run the migrations.
-     */
     public function up(): void
     {
         Schema::create('sync_runs', function (Blueprint $table) {
             $table->id();
-            $table->string('module_name', 100);   // schema / replication / backup / manual_sync
-            $table->string('run_type', 50);       // manual / scheduled / health / snapshot
-            $table->string('status', 30)->default('pending'); // pending / running / success / failed
-            $table->longText('summary')->nullable();
+            $table->string('module_name');
+            $table->string('run_type')->nullable();
+            $table->foreignId('sync_table_id')->nullable()->constrained('sync_tables')->nullOnDelete();
+            $table->string('source_table_name')->nullable();
+            $table->string('destination_table_name')->nullable();
+            $table->string('status')->default('pending');
+            $table->integer('records_processed')->default(0);
             $table->timestamp('started_at')->nullable();
             $table->timestamp('ended_at')->nullable();
+            $table->text('message')->nullable();
             $table->unsignedBigInteger('created_by')->nullable();
             $table->timestamps();
 
-            $table->foreign('created_by')
-                ->references('id')
-                ->on('admin_users')
-                ->nullOnDelete();
-
             $table->index('module_name');
-            $table->index('run_type');
             $table->index('status');
-            $table->index('started_at');
         });
     }
 
-    /**
-     * Reverse the migrations.
-     */
     public function down(): void
     {
         Schema::dropIfExists('sync_runs');

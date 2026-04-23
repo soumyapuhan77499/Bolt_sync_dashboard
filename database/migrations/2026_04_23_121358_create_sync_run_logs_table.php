@@ -6,20 +6,20 @@ use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
-    /**
-     * Run the migrations.
-     */
     public function up(): void
     {
         Schema::create('sync_run_logs', function (Blueprint $table) {
             $table->id();
+            $table->foreignId('sync_run_id')->constrained('sync_runs')->cascadeOnDelete();
+            $table->string('level')->default('info');
+            $table->text('message');
+            $table->json('context')->nullable();
             $table->timestamps();
+
+            $table->index('level');
         });
     }
 
-    /**
-     * Reverse the migrations.
-     */
     public function down(): void
     {
         Schema::dropIfExists('sync_run_logs');

@@ -38,7 +38,11 @@ Route::prefix('admin')->name('admin.')->group(function () {
         Route::post('/replication/stop', [ReplicationController::class, 'stop'])->name('replication.stop');
         Route::get('/replication/status', [ReplicationController::class, 'status'])->name('replication.status');
 
-        Route::get('/sync-jobs', [SyncJobController::class, 'index'])->name('sync-jobs.index');
+        Route::prefix('sync-jobs')->name('sync-jobs.')->group(function () {
+            Route::get('/', [SyncJobController::class, 'index'])->name('index');
+            Route::post('/save-mapping', [SyncJobController::class, 'saveMapping'])->name('save-mapping');
+            Route::post('/run', [SyncJobController::class, 'run'])->name('run');
+        });
 
         Route::get('/backup', [BackupController::class, 'index'])->name('backup.index');
         Route::get('/health', [HealthController::class, 'index'])->name('health.index');
