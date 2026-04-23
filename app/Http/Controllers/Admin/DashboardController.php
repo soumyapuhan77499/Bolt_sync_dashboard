@@ -3,7 +3,6 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
-use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
@@ -11,29 +10,44 @@ class DashboardController extends Controller
 {
     public function index()
     {
-        $adminSchema = $this->getCurrentSchema();
+        $sourceStatus = $this->getExternalDatabaseTables(
+            'source_pg',
+            env('SRC_PG_HOST'),
+            env('SRC_PG_PORT', 5432),
+            env('SRC_PG_DATABASE', 'postgres'),
+            env('SRC_PG_USERNAME', 'postgres'),
+            env('SRC_PG_PASSWORD', ''),
+            env('SRC_PG_SCHEMA', 'public'),
+            env('SRC_PG_SSLMODE', 'require')
+        );
 
-        $sourceStatus = $this->getExternalDbStatus('source');
-        $destinationStatus = $this->getExternalDbStatus('destination');
+        $destinationStatus = $this->getExternalDatabaseTables(
+            'destination_pg',
+            env('DST_PG_HOST'),
+            env('DST_PG_PORT', 5432),
+            env('DST_PG_DATABASE', 'postgres'),
+            env('DST_PG_USERNAME', 'postgres'),
+            env('DST_PG_PASSWORD', ''),
+            env('DST_PG_SCHEMA', 'public'),
+            env('DST_PG_SSLMODE', 'disable')
+        );
 
-        $adminTables = $this->getAdminTableNames();
+        $adminTables = $this->getAdminTables();
 
         $adminStatus = [
             'status' => 'connected',
-            'database_name' => env('DB_DATABASE', '-'),
-            'schema_name' => $adminSchema,
-            'tables_count' => count($adminTables),
-            'message' => 'Admin database connected successfully.',
-            'tables' => $adminTables,
+            'database_name' => env('DB_DATABASE', 'postgres'),
+            'schema_name'   => env('DB_SCHEMA', 'public'),
+            'tables_count'  => count($adminTables),
+            'message'       => 'Admin database connected successfully.',
+            'tables'        => $adminTables,
         ];
 
         $stats = [
-            'source_tables' => $sourceStatus['tables_count'] ?? 0,
+            'source_tables'      => $sourceStatus['tables_count'] ?? 0,
             'destination_tables' => $destinationStatus['tables_count'] ?? 0,
-            'admin_tables' => count($adminTables),
-            'healthy_connections' => (($sourceStatus['status'] ?? '') === 'connected' ? 1 : 0)
-                + (($destinationStatus['status'] ?? '') === 'connected' ? 1 : 0)
-                + 1,
+            'admin_tables'       => count($adminTables),
+            'healthy_connections'=> $this->countHealthyConnections($sourceStatus, $destinationStatus, $adminStatus),
         ];
 
         $recentSyncRuns = $this->safeGetTableData('sync_runs', 'id', 10);
@@ -53,87 +67,71 @@ class DashboardController extends Controller
         ));
     }
 
-    private function getExternalDbStatus(string $type): array
-    {
+    private function getExternalDatabaseTables(
+        string $connectionName,
+        ?string $host,
+        $port,
+        ?string $database,
+        ?string $username,
+        ?string $password,
+        ?string $schema,
+        ?string $sslmode
+    ): array {
         try {
-            if (!Schema::hasTable('sync_connections')) {
+            if (empty($host) || empty($database) || empty($username)) {
                 return [
-                    'status' => 'pending',
-                    'database_name' => '-',
-                    'schema_name' => 'public',
+                    'status' => 'failed',
+                    'database_name' => $database ?: '-',
+                    'schema_name' => $schema ?: 'public',
                     'tables_count' => 0,
-                    'message' => 'sync_connections table not found.',
+                    'message' => 'Database credentials are missing.',
                     'tables' => [],
                 ];
             }
 
-            $connection = DB::table('sync_connections')
-                ->where('connection_type', $type)
-                ->where('is_active', true)
-                ->first();
+            config([
+                "database.connections.$connectionName" => [
+                    'driver' => 'pgsql',
+                    'host' => $host,
+                    'port' => $port,
+                    'database' => $database,
+                    'username' => $username,
+                    'password' => $password,
+                    'charset' => 'utf8',
+                    'prefix' => '',
+                    'prefix_indexes' => true,
+                    'search_path' => $schema ?: 'public',
+                    'sslmode' => $sslmode ?: 'prefer',
+                ]
+            ]);
 
-            if (!$connection) {
-                return [
-                    'status' => 'pending',
-                    'database_name' => '-',
-                    'schema_name' => 'public',
-                    'tables_count' => 0,
-                    'message' => ucfirst($type) . ' connection not configured.',
-                    'tables' => [],
-                ];
-            }
+            DB::purge($connectionName);
 
-            $password = '';
-            if (!empty($connection->password_encrypted)) {
-                $password = Crypt::decryptString($connection->password_encrypted);
-            }
+            $tables = DB::connection($connectionName)->select("
+                select table_name
+                from information_schema.tables
+                where table_schema = ?
+                and table_type = 'BASE TABLE'
+                order by table_name asc
+            ", [$schema ?: 'public']);
 
-            $configName = 'temp_' . $type . '_dashboard';
-
-            config(["database.connections.$configName" => [
-                'driver' => 'pgsql',
-                'host' => $connection->host,
-                'port' => $connection->port,
-                'database' => $connection->database_name,
-                'username' => $connection->username,
-                'password' => $password,
-                'charset' => 'utf8',
-                'prefix' => '',
-                'prefix_indexes' => true,
-                'search_path' => $connection->schema_name,
-                'schema' => $connection->schema_name,
-                'sslmode' => $connection->sslmode ?: 'disable',
-            ]]);
-
-            DB::purge($configName);
-
-            $databaseResult = DB::connection($configName)->selectOne('select current_database() as database_name');
-
-            $tables = DB::connection($configName)->select(
-                "select table_name
-                 from information_schema.tables
-                 where table_schema = ?
-                 and table_type = 'BASE TABLE'
-                 order by table_name asc",
-                [$connection->schema_name]
-            );
-
-            DB::disconnect($configName);
-            DB::purge($configName);
+            DB::disconnect($connectionName);
 
             return [
                 'status' => 'connected',
-                'database_name' => $databaseResult->database_name ?? $connection->database_name,
-                'schema_name' => $connection->schema_name,
+                'database_name' => $database,
+                'schema_name' => $schema ?: 'public',
                 'tables_count' => count($tables),
-                'message' => ucfirst($type) . ' database connected successfully.',
+                'message' => 'Connected successfully.',
                 'tables' => collect($tables)->pluck('table_name')->toArray(),
             ];
         } catch (\Throwable $e) {
+            DB::disconnect($connectionName);
+
             return [
                 'status' => 'failed',
-                'database_name' => '-',
-                'schema_name' => 'public',
+                'database_name' => $database ?: '-',
+                'schema_name' => $schema ?: 'public',
                 'tables_count' => 0,
                 'message' => $e->getMessage(),
                 'tables' => [],
@@ -141,31 +139,42 @@ class DashboardController extends Controller
         }
     }
 
-    private function getCurrentSchema(): string
+    private function getAdminTables(): array
     {
         try {
-            $row = DB::selectOne('select current_schema() as schema_name');
-            return $row->schema_name ?? 'public';
-        } catch (\Throwable $e) {
-            return 'public';
-        }
-    }
+            $schema = env('DB_SCHEMA', 'public');
 
-    private function getAdminTableNames(): array
-    {
-        try {
             $tables = DB::select("
                 select table_name
                 from information_schema.tables
-                where table_schema = current_schema()
+                where table_schema = ?
                 and table_type = 'BASE TABLE'
                 order by table_name asc
-            ");
+            ", [$schema]);
 
             return collect($tables)->pluck('table_name')->toArray();
         } catch (\Throwable $e) {
             return [];
         }
+    }
+
+    private function countHealthyConnections(array $sourceStatus, array $destinationStatus, array $adminStatus): int
+    {
+        $count = 0;
+
+        if (($sourceStatus['status'] ?? '') === 'connected') {
+            $count++;
+        }
+
+        if (($destinationStatus['status'] ?? '') === 'connected') {
+            $count++;
+        }
+
+        if (($adminStatus['status'] ?? '') === 'connected') {
+            $count++;
+        }
+
+        return $count;
     }
 
     private function safeGetTableData(string $table, string $orderBy = 'id', int $limit = 10)
