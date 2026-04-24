@@ -45,6 +45,7 @@ class SyncJobController extends Controller
         $validated = $request->validate([
             'mapping_id' => ['nullable', 'integer'],
             'name' => ['required', 'string', 'max:150'],
+            'transfer_direction' => ['required', 'in:source_to_destination,destination_to_source'],
             'source_table_name' => ['required', 'string', 'max:150'],
             'destination_table_name' => ['required', 'string', 'max:150'],
             'sync_mode' => ['required', 'in:mirror,append'],
@@ -54,12 +55,14 @@ class SyncJobController extends Controller
         ]);
 
         $mapping = SyncTable::find($validated['mapping_id'] ?? null);
+
         if (! $mapping) {
             $mapping = new SyncTable();
             $mapping->created_by = session('admin_user_id');
         }
 
         $mapping->name = $validated['name'];
+        $mapping->transfer_direction = $validated['transfer_direction'];
         $mapping->source_table_name = $validated['source_table_name'];
         $mapping->destination_table_name = $validated['destination_table_name'];
         $mapping->sync_mode = $validated['sync_mode'];
@@ -79,13 +82,27 @@ class SyncJobController extends Controller
         ]);
 
         $mapping = SyncTable::find($request->mapping_id);
+
         if (! $mapping) {
             return back()->with('error', 'Sync mapping not found.');
         }
 
+        $direction = $mapping->transfer_direction ?: 'source_to_destination';
+
+        $readConnectionType = $direction === 'destination_to_source' ? 'destination' : 'source';
+        $writeConnectionType = $direction === 'destination_to_source' ? 'source' : 'destination';
+
+        $readTableName = $direction === 'destination_to_source'
+            ? $mapping->destination_table_name
+            : $mapping->source_table_name;
+
+        $writeTableName = $direction === 'destination_to_source'
+            ? $mapping->source_table_name
+            : $mapping->destination_table_name;
+
         $syncRun = SyncRun::create([
             'module_name' => 'manual_sync',
-            'run_type' => 'manual',
+            'run_type' => $direction,
             'sync_table_id' => $mapping->id,
             'source_table_name' => $mapping->source_table_name,
             'destination_table_name' => $mapping->destination_table_name,
@@ -93,46 +110,49 @@ class SyncJobController extends Controller
             'records_processed' => 0,
             'started_at' => now(),
             'created_by' => session('admin_user_id'),
-            'message' => 'Manual sync started.',
+            'message' => 'Manual transfer started.',
         ]);
 
-        $this->createRunLog($syncRun->id, 'info', 'Manual sync started.', [
+        $this->createRunLog($syncRun->id, 'info', 'Manual transfer started.', [
             'mapping_id' => $mapping->id,
-            'source_table_name' => $mapping->source_table_name,
-            'destination_table_name' => $mapping->destination_table_name,
+            'direction' => $direction,
+            'read_connection' => $readConnectionType,
+            'write_connection' => $writeConnectionType,
+            'read_table' => $readTableName,
+            'write_table' => $writeTableName,
         ]);
 
-        $sourceConnection = $this->resolveSavedConnection('source');
-        $destinationConnection = $this->resolveSavedConnection('destination');
+        $readConnection = $this->resolveSavedConnection($readConnectionType);
+        $writeConnection = $this->resolveSavedConnection($writeConnectionType);
 
-        $sourceConnectionName = 'manual_sync_source';
-        $destinationConnectionName = 'manual_sync_destination';
+        $readConnectionName = 'manual_transfer_read';
+        $writeConnectionName = 'manual_transfer_write';
 
         try {
-            $this->registerTempConnection($sourceConnectionName, $sourceConnection);
-            $this->registerTempConnection($destinationConnectionName, $destinationConnection);
+            $this->registerTempConnection($readConnectionName, $readConnection);
+            $this->registerTempConnection($writeConnectionName, $writeConnection);
 
-            $sourceColumns = $this->getTableColumns(
-                $sourceConnectionName,
-                $sourceConnection['schema_name'],
-                $mapping->source_table_name
+            $readColumns = $this->getTableColumns(
+                $readConnectionName,
+                $readConnection['schema_name'],
+                $readTableName
             );
 
-            $destinationColumns = $this->getTableColumns(
-                $destinationConnectionName,
-                $destinationConnection['schema_name'],
-                $mapping->destination_table_name
+            $writeColumns = $this->getTableColumns(
+                $writeConnectionName,
+                $writeConnection['schema_name'],
+                $writeTableName
             );
 
-            if (empty($sourceColumns)) {
-                throw new \RuntimeException('Source table columns not found.');
+            if (empty($readColumns)) {
+                throw new \RuntimeException('Read table columns not found.');
             }
 
-            if (empty($destinationColumns)) {
-                throw new \RuntimeException('Destination table columns not found.');
+            if (empty($writeColumns)) {
+                throw new \RuntimeException('Write table columns not found.');
             }
 
-            $commonColumns = array_values(array_intersect($sourceColumns, $destinationColumns));
+            $commonColumns = array_values(array_intersect($readColumns, $writeColumns));
 
             if (! empty($mapping->selected_columns)) {
                 $selectedColumns = collect(explode(',', $mapping->selected_columns))
@@ -145,59 +165,66 @@ class SyncJobController extends Controller
             }
 
             if (empty($commonColumns)) {
-                throw new \RuntimeException('No common columns found between source and destination tables.');
+                throw new \RuntimeException('No common columns found between selected tables.');
             }
 
-            $sourceRows = DB::connection($sourceConnectionName)
-                ->table($mapping->source_table_name)
+            $rows = DB::connection($readConnectionName)
+                ->table($readTableName)
                 ->select($commonColumns)
                 ->get()
                 ->map(fn ($row) => (array) $row)
                 ->toArray();
 
-            DB::connection($destinationConnectionName)->beginTransaction();
+            DB::connection($writeConnectionName)->beginTransaction();
 
             if ($mapping->sync_mode === 'mirror') {
-                DB::connection($destinationConnectionName)
-                    ->table($mapping->destination_table_name)
+                DB::connection($writeConnectionName)
+                    ->table($writeTableName)
                     ->delete();
             }
 
             $inserted = 0;
 
-            foreach (array_chunk($sourceRows, 500) as $chunk) {
+            foreach (array_chunk($rows, 500) as $chunk) {
                 if (! empty($chunk)) {
-                    DB::connection($destinationConnectionName)
-                        ->table($mapping->destination_table_name)
+                    DB::connection($writeConnectionName)
+                        ->table($writeTableName)
                         ->insert($chunk);
 
                     $inserted += count($chunk);
                 }
             }
 
-            DB::connection($destinationConnectionName)->commit();
+            DB::connection($writeConnectionName)->commit();
+
+            $directionLabel = $direction === 'destination_to_source'
+                ? 'Destination to Source'
+                : 'Source to Destination';
 
             $mapping->last_synced_at = now();
             $mapping->last_sync_status = 'success';
-            $mapping->last_sync_message = "Manual sync completed successfully. Rows processed: {$inserted}.";
+            $mapping->last_sync_message = "{$directionLabel} transfer completed successfully. Rows processed: {$inserted}.";
             $mapping->save();
 
             $syncRun->status = 'success';
             $syncRun->records_processed = $inserted;
             $syncRun->ended_at = now();
-            $syncRun->message = "Manual sync completed successfully. Rows processed: {$inserted}.";
+            $syncRun->message = "{$directionLabel} transfer completed successfully. Rows processed: {$inserted}.";
             $syncRun->save();
 
-            $this->createRunLog($syncRun->id, 'success', 'Manual sync completed successfully.', [
+            $this->createRunLog($syncRun->id, 'success', 'Manual transfer completed successfully.', [
+                'direction' => $direction,
                 'rows_processed' => $inserted,
                 'common_columns' => $commonColumns,
+                'read_table' => $readTableName,
+                'write_table' => $writeTableName,
                 'sync_mode' => $mapping->sync_mode,
             ]);
 
-            return back()->with('success', 'Manual sync completed successfully.');
+            return back()->with('success', 'Manual transfer completed successfully.');
         } catch (Throwable $e) {
             try {
-                DB::connection($destinationConnectionName)->rollBack();
+                DB::connection($writeConnectionName)->rollBack();
             } catch (Throwable $rollbackException) {
             }
 
@@ -211,17 +238,18 @@ class SyncJobController extends Controller
             $syncRun->message = $e->getMessage();
             $syncRun->save();
 
-            $this->createRunLog($syncRun->id, 'error', 'Manual sync failed.', [
+            $this->createRunLog($syncRun->id, 'error', 'Manual transfer failed.', [
+                'direction' => $direction,
                 'error' => $e->getMessage(),
             ]);
 
-            return back()->with('error', 'Manual sync failed: ' . $e->getMessage());
+            return back()->with('error', 'Manual transfer failed: ' . $e->getMessage());
         } finally {
-            DB::disconnect($sourceConnectionName);
-            DB::purge($sourceConnectionName);
+            DB::disconnect($readConnectionName);
+            DB::purge($readConnectionName);
 
-            DB::disconnect($destinationConnectionName);
-            DB::purge($destinationConnectionName);
+            DB::disconnect($writeConnectionName);
+            DB::purge($writeConnectionName);
         }
     }
 

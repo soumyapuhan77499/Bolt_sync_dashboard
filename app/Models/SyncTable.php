@@ -10,6 +10,7 @@ class SyncTable extends Model
 
     protected $fillable = [
         'name',
+        'transfer_direction',
         'source_table_name',
         'destination_table_name',
         'sync_mode',
