@@ -46,7 +46,9 @@ Route::prefix('admin')->name('admin.')->group(function () {
 
         Route::get('/backup', [BackupController::class, 'index'])->name('backup.index');
         Route::get('/health', [HealthController::class, 'index'])->name('health.index');
-        Route::get('/audit-logs', [AuditLogController::class, 'index'])->name('audit.index');
-        Route::get('/settings', [SettingController::class, 'index'])->name('settings.index');
+       Route::get('/audit-logs', [AuditLogController::class, 'index'])->name('audit.index');
+
+Route::get('/settings', [SettingController::class, 'index'])->name('settings.index');
+Route::post('/settings/save', [SettingController::class, 'save'])->name('settings.save');
     });
 });
