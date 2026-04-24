@@ -218,18 +218,24 @@ class DataCompareController extends Controller
         $sourceInfo = $this->getConnectionTables('source');
         $destinationInfo = $this->getConnectionTables('destination');
 
-        $commonTables = array_values(array_intersect(
+        $tableOverview = $this->buildTableOverview(
             $sourceInfo['tables'] ?? [],
             $destinationInfo['tables'] ?? []
-        ));
+        );
 
-        sort($commonTables);
+        $commonTables = collect($tableOverview)
+            ->where('is_common', true)
+            ->pluck('table_name')
+            ->values()
+            ->all();
 
         $stats = [
             'source_tables' => count($sourceInfo['tables'] ?? []),
             'destination_tables' => count($destinationInfo['tables'] ?? []),
             'common_tables' => count($commonTables),
             'recent_compare_runs' => DataCompareRun::count(),
+            'source_total_rows' => collect($sourceInfo['tables'] ?? [])->sum('row_count'),
+            'destination_total_rows' => collect($destinationInfo['tables'] ?? [])->sum('row_count'),
         ];
 
         $recentRuns = DataCompareRun::orderByDesc('id')->limit(20)->get();
@@ -237,11 +243,53 @@ class DataCompareController extends Controller
         return view('admin.data-compare.index', compact(
             'sourceInfo',
             'destinationInfo',
+            'tableOverview',
             'commonTables',
             'stats',
             'recentRuns',
             'results'
         ));
+    }
+
+    private function buildTableOverview(array $sourceTables, array $destinationTables): array
+    {
+        $sourceMap = collect($sourceTables)->keyBy('table_name');
+        $destinationMap = collect($destinationTables)->keyBy('table_name');
+
+        $allTableNames = collect(array_merge(
+            array_keys($sourceMap->all()),
+            array_keys($destinationMap->all())
+        ))
+            ->unique()
+            ->sort()
+            ->values();
+
+        return $allTableNames->map(function ($tableName) use ($sourceMap, $destinationMap) {
+            $sourceExists = $sourceMap->has($tableName);
+            $destinationExists = $destinationMap->has($tableName);
+
+            $sourceRowCount = $sourceExists ? (int) ($sourceMap[$tableName]['row_count'] ?? 0) : 0;
+            $destinationRowCount = $destinationExists ? (int) ($destinationMap[$tableName]['row_count'] ?? 0) : 0;
+
+            $status = 'missing';
+            if ($sourceExists && $destinationExists) {
+                $status = $sourceRowCount === $destinationRowCount ? 'matched_count' : 'count_mismatch';
+            } elseif ($sourceExists) {
+                $status = 'only_source';
+            } elseif ($destinationExists) {
+                $status = 'only_destination';
+            }
+
+            return [
+                'table_name' => $tableName,
+                'source_exists' => $sourceExists,
+                'destination_exists' => $destinationExists,
+                'source_row_count' => $sourceRowCount,
+                'destination_row_count' => $destinationRowCount,
+                'is_common' => $sourceExists && $destinationExists,
+                'status' => $status,
+            ];
+        })->all();
     }
 
     private function getConnectionTables(string $type): array
@@ -262,18 +310,28 @@ class DataCompareController extends Controller
             $this->registerTempConnection($connectionName, $config);
 
             $tables = DB::connection($connectionName)->select(
-                "select table_name
-                 from information_schema.tables
-                 where table_schema = ?
-                 and table_type = 'BASE TABLE'
-                 order by table_name asc",
+                "select
+                    t.table_name,
+                    coalesce(s.n_live_tup::bigint, 0) as row_count
+                 from information_schema.tables t
+                 left join pg_stat_user_tables s
+                    on s.schemaname = t.table_schema
+                   and s.relname = t.table_name
+                 where t.table_schema = ?
+                   and t.table_type = 'BASE TABLE'
+                 order by t.table_name asc",
                 [$config['schema_name']]
             );
 
             return [
                 'status' => 'connected',
                 'message' => 'Connection successful.',
-                'tables' => collect($tables)->pluck('table_name')->toArray(),
+                'tables' => collect($tables)->map(function ($row) {
+                    return [
+                        'table_name' => $row->table_name,
+                        'row_count' => (int) ($row->row_count ?? 0),
+                    ];
+                })->values()->all(),
                 'schema_name' => $config['schema_name'],
                 'database_name' => $config['database_name'],
             ];
