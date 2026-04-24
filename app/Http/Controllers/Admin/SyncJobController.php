@@ -1,530 +1,428 @@
-@extends('admin.layouts.app')
+<?php
 
-@section('title', 'Manual Transfer - Bolt Sync Admin')
-@section('page_title', 'Manual Transfer')
-@section('page_subtitle', 'Transfer data manually in either direction: Source → Destination or Destination → Source')
+namespace App\Http\Controllers\Admin;
 
-@push('styles')
-    <style>
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 18px;
-            margin-bottom: 22px;
+use App\Http\Controllers\Controller;
+use App\Models\SyncRun;
+use App\Models\SyncRunLog;
+use App\Models\SyncTable;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use Throwable;
+
+class SyncJobController extends Controller
+{
+    public function index()
+    {
+        $sourceInfo = $this->getConnectionTables('source');
+        $destinationInfo = $this->getConnectionTables('destination');
+
+        $mappings = SyncTable::orderByDesc('id')->get();
+        $recentRuns = SyncRun::orderByDesc('id')->limit(20)->get();
+        $recentLogs = SyncRunLog::orderByDesc('id')->limit(30)->get();
+
+        $stats = [
+            'source_tables' => count($sourceInfo['tables'] ?? []),
+            'destination_tables' => count($destinationInfo['tables'] ?? []),
+            'active_mappings' => SyncTable::where('is_active', true)->count(),
+            'recent_runs' => SyncRun::count(),
+        ];
+
+        return view('admin.sync-jobs.index', compact(
+            'sourceInfo',
+            'destinationInfo',
+            'mappings',
+            'recentRuns',
+            'recentLogs',
+            'stats'
+        ));
+    }
+
+    public function saveMapping(Request $request)
+    {
+        $validated = $request->validate([
+            'mapping_id' => ['nullable', 'integer'],
+            'name' => ['required', 'string', 'max:150'],
+            'transfer_direction' => ['required', 'in:source_to_destination,destination_to_source'],
+            'source_table_name' => ['required', 'string', 'max:150'],
+            'destination_table_name' => ['required', 'string', 'max:150'],
+            'sync_mode' => ['required', 'in:mirror,append'],
+            'primary_key_column' => ['nullable', 'string', 'max:150'],
+            'selected_columns' => ['nullable', 'string'],
+            'notes' => ['nullable', 'string'],
+        ]);
+
+        $mapping = SyncTable::find($validated['mapping_id'] ?? null);
+
+        if (! $mapping) {
+            $mapping = new SyncTable();
+            $mapping->created_by = $this->currentAdminId();
         }
 
-        .stat-card,
-        .panel-card,
-        .form-card,
-        .table-card {
-            background: #fff;
-            border: 1px solid #e5e7eb;
-            border-radius: 18px;
-            padding: 22px;
-            box-shadow: 0 10px 30px rgba(17, 24, 39, 0.06);
+        $mapping->name = $validated['name'];
+        $mapping->transfer_direction = $validated['transfer_direction'];
+        $mapping->source_table_name = $validated['source_table_name'];
+        $mapping->destination_table_name = $validated['destination_table_name'];
+        $mapping->sync_mode = $validated['sync_mode'];
+        $mapping->primary_key_column = $validated['primary_key_column'] ?? null;
+        $mapping->selected_columns = $this->normalizeCsvText($validated['selected_columns'] ?? null);
+        $mapping->notes = $validated['notes'] ?? null;
+        $mapping->is_active = $request->boolean('is_active', true);
+        $mapping->save();
+
+        return back()->with('success', 'Transfer mapping saved successfully.');
+    }
+
+    public function run(Request $request)
+    {
+        $request->validate([
+            'mapping_id' => ['required', 'integer'],
+        ]);
+
+        $mapping = SyncTable::find($request->mapping_id);
+
+        if (! $mapping) {
+            return back()->with('error', 'Transfer mapping not found.');
         }
 
-        .stat-label {
-            font-size: 13px;
-            color: #6b7280;
-            margin-bottom: 10px;
-            font-weight: 700;
-        }
+        $direction = $mapping->transfer_direction ?: 'source_to_destination';
 
-        .stat-value {
-            font-size: 32px;
-            font-weight: 800;
-            color: #111827;
-            line-height: 1;
-        }
+        $readConnectionType = $direction === 'destination_to_source' ? 'destination' : 'source';
+        $writeConnectionType = $direction === 'destination_to_source' ? 'source' : 'destination';
 
-        .two-col-grid {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 18px;
-            margin-bottom: 22px;
-        }
+        $readTableName = $direction === 'destination_to_source'
+            ? $mapping->destination_table_name
+            : $mapping->source_table_name;
 
-        .panel-card h3,
-        .form-card h3,
-        .table-card h3 {
-            font-size: 18px;
-            margin-bottom: 16px;
-            color: #111827;
-        }
+        $writeTableName = $direction === 'destination_to_source'
+            ? $mapping->source_table_name
+            : $mapping->destination_table_name;
 
-        .detail-list {
-            display: grid;
-            gap: 10px;
-        }
+        $syncRun = SyncRun::create([
+            'module_name' => 'manual_sync',
+            'run_type' => $direction,
+            'sync_table_id' => $mapping->id,
+            'source_table_name' => $mapping->source_table_name,
+            'destination_table_name' => $mapping->destination_table_name,
+            'status' => 'running',
+            'records_processed' => 0,
+            'started_at' => now(),
+            'created_by' => $this->currentAdminId(),
+            'message' => 'Manual transfer started.',
+        ]);
 
-        .detail-row {
-            display: flex;
-            justify-content: space-between;
-            gap: 12px;
-            padding-bottom: 10px;
-            border-bottom: 1px dashed #e5e7eb;
-        }
+        $this->createRunLog($syncRun->id, 'info', 'Manual transfer started.', [
+            'mapping_id' => $mapping->id,
+            'direction' => $direction,
+            'read_connection' => $readConnectionType,
+            'write_connection' => $writeConnectionType,
+            'read_table' => $readTableName,
+            'write_table' => $writeTableName,
+        ]);
 
-        .detail-row:last-child {
-            border-bottom: none;
-            padding-bottom: 0;
-        }
+        $readConnection = $this->resolveSavedConnection($readConnectionType);
+        $writeConnection = $this->resolveSavedConnection($writeConnectionType);
 
-        .detail-label {
-            color: #6b7280;
-            font-size: 13px;
-            font-weight: 700;
-        }
+        $readConnectionName = 'manual_transfer_read';
+        $writeConnectionName = 'manual_transfer_write';
 
-        .detail-value {
-            color: #111827;
-            font-size: 13px;
-            font-weight: 600;
-            text-align: right;
-            word-break: break-word;
-        }
+        try {
+            $this->registerTempConnection($readConnectionName, $readConnection);
+            $this->registerTempConnection($writeConnectionName, $writeConnection);
 
-        .form-grid {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 16px;
-        }
+            $readColumns = $this->getTableColumns(
+                $readConnectionName,
+                $readConnection['schema_name'],
+                $readTableName
+            );
 
-        .form-group {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
+            $writeColumns = $this->getTableColumns(
+                $writeConnectionName,
+                $writeConnection['schema_name'],
+                $writeTableName
+            );
 
-        .form-group.full {
-            grid-column: 1 / -1;
-        }
-
-        .form-label {
-            font-size: 13px;
-            font-weight: 700;
-            color: #374151;
-        }
-
-        .form-note {
-            font-size: 12px;
-            color: #6b7280;
-        }
-
-        .form-control,
-        .form-select,
-        .form-textarea {
-            width: 100%;
-            min-height: 46px;
-            border: 1px solid #d1d5db;
-            border-radius: 12px;
-            padding: 12px 14px;
-            font-size: 14px;
-            background: #fff;
-        }
-
-        .form-textarea {
-            min-height: 110px;
-            resize: vertical;
-        }
-
-        .checkbox-row {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 18px;
-            margin-top: 8px;
-        }
-
-        .check-item {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 14px;
-            color: #374151;
-            font-weight: 600;
-        }
-
-        .action-row {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 12px;
-            margin-top: 16px;
-        }
-
-        .btn {
-            border: none;
-            border-radius: 12px;
-            padding: 12px 16px;
-            font-size: 14px;
-            font-weight: 700;
-            cursor: pointer;
-        }
-
-        .btn-primary {
-            background: #2563eb;
-            color: #fff;
-        }
-
-        .btn-success {
-            background: #059669;
-            color: #fff;
-        }
-
-        .btn-dark {
-            background: #111827;
-            color: #fff;
-        }
-
-        .empty-box {
-            padding: 16px;
-            border: 1px dashed #d1d5db;
-            border-radius: 14px;
-            background: #f9fafb;
-            color: #6b7280;
-            font-size: 14px;
-        }
-
-        .table-wrapper {
-            overflow-x: auto;
-        }
-
-        .data-table {
-            width: 100%;
-            border-collapse: collapse;
-            min-width: 1100px;
-        }
-
-        .data-table th,
-        .data-table td {
-            padding: 12px 14px;
-            border-bottom: 1px solid #e5e7eb;
-            text-align: left;
-            font-size: 13px;
-            vertical-align: top;
-        }
-
-        .data-table th {
-            background: #f9fafb;
-            color: #374151;
-            font-weight: 800;
-        }
-
-        .direction-box {
-            background: #eff6ff;
-            border: 1px solid #bfdbfe;
-            color: #1d4ed8;
-            border-radius: 14px;
-            padding: 14px;
-            margin-bottom: 18px;
-            font-size: 14px;
-            font-weight: 600;
-        }
-
-        .badge {
-            display: inline-block;
-            padding: 5px 10px;
-            border-radius: 999px;
-            font-size: 12px;
-            font-weight: 700;
-            background: #eef2ff;
-            color: #4338ca;
-        }
-
-        @media (max-width: 1199px) {
-
-            .stats-grid,
-            .two-col-grid,
-            .form-grid {
-                grid-template-columns: 1fr;
+            if (empty($readColumns)) {
+                throw new \RuntimeException('Read table columns not found.');
             }
+
+            if (empty($writeColumns)) {
+                throw new \RuntimeException('Write table columns not found.');
+            }
+
+            $commonColumns = array_values(array_intersect($readColumns, $writeColumns));
+
+            if (! empty($mapping->selected_columns)) {
+                $selectedColumns = collect(explode(',', $mapping->selected_columns))
+                    ->map(fn ($item) => trim($item))
+                    ->filter()
+                    ->values()
+                    ->all();
+
+                $commonColumns = array_values(array_intersect($commonColumns, $selectedColumns));
+            }
+
+            if (empty($commonColumns)) {
+                throw new \RuntimeException('No common columns found between selected tables.');
+            }
+
+            $rows = DB::connection($readConnectionName)
+                ->table($readTableName)
+                ->select($commonColumns)
+                ->get()
+                ->map(fn ($row) => (array) $row)
+                ->toArray();
+
+            DB::connection($writeConnectionName)->beginTransaction();
+
+            if ($mapping->sync_mode === 'mirror') {
+                DB::connection($writeConnectionName)
+                    ->table($writeTableName)
+                    ->delete();
+            }
+
+            $inserted = 0;
+
+            foreach (array_chunk($rows, 500) as $chunk) {
+                if (! empty($chunk)) {
+                    DB::connection($writeConnectionName)
+                        ->table($writeTableName)
+                        ->insert($chunk);
+
+                    $inserted += count($chunk);
+                }
+            }
+
+            DB::connection($writeConnectionName)->commit();
+
+            $directionLabel = $direction === 'destination_to_source'
+                ? 'Destination to Source'
+                : 'Source to Destination';
+
+            $mapping->last_synced_at = now();
+            $mapping->last_sync_status = 'success';
+            $mapping->last_sync_message = "{$directionLabel} transfer completed successfully. Rows processed: {$inserted}.";
+            $mapping->save();
+
+            $syncRun->status = 'success';
+            $syncRun->records_processed = $inserted;
+            $syncRun->ended_at = now();
+            $syncRun->message = "{$directionLabel} transfer completed successfully. Rows processed: {$inserted}.";
+            $syncRun->save();
+
+            $this->createRunLog($syncRun->id, 'success', 'Manual transfer completed successfully.', [
+                'direction' => $direction,
+                'rows_processed' => $inserted,
+                'common_columns' => $commonColumns,
+                'read_table' => $readTableName,
+                'write_table' => $writeTableName,
+                'sync_mode' => $mapping->sync_mode,
+            ]);
+
+            return back()->with('success', 'Manual transfer completed successfully.');
+        } catch (Throwable $e) {
+            try {
+                DB::connection($writeConnectionName)->rollBack();
+            } catch (Throwable $rollbackException) {
+            }
+
+            $mapping->last_synced_at = now();
+            $mapping->last_sync_status = 'failed';
+            $mapping->last_sync_message = $e->getMessage();
+            $mapping->save();
+
+            $syncRun->status = 'failed';
+            $syncRun->ended_at = now();
+            $syncRun->message = $e->getMessage();
+            $syncRun->save();
+
+            $this->createRunLog($syncRun->id, 'error', 'Manual transfer failed.', [
+                'direction' => $direction,
+                'error' => $e->getMessage(),
+            ]);
+
+            return back()->with('error', 'Manual transfer failed: ' . $e->getMessage());
+        } finally {
+            DB::disconnect($readConnectionName);
+            DB::purge($readConnectionName);
+
+            DB::disconnect($writeConnectionName);
+            DB::purge($writeConnectionName);
         }
-    </style>
-@endpush
+    }
 
-@section('content')
-    <div class="stats-grid">
-        <div class="stat-card">
-            <div class="stat-label">Source Tables</div>
-            <div class="stat-value">{{ $stats['source_tables'] }}</div>
-        </div>
+    private function getConnectionTables(string $type): array
+    {
+        $record = $this->resolveSavedConnection($type);
 
-        <div class="stat-card">
-            <div class="stat-label">Destination Tables</div>
-            <div class="stat-value">{{ $stats['destination_tables'] }}</div>
-        </div>
+        if (empty($record['host']) || empty($record['database_name']) || empty($record['username'])) {
+            return [
+                'status' => 'failed',
+                'message' => ucfirst($type) . ' connection credentials are incomplete.',
+                'tables' => [],
+            ];
+        }
 
-        <div class="stat-card">
-            <div class="stat-label">Active Mappings</div>
-            <div class="stat-value">{{ $stats['active_mappings'] }}</div>
-        </div>
+        $connectionName = 'sync_jobs_' . $type;
 
-        <div class="stat-card">
-            <div class="stat-label">Total Runs</div>
-            <div class="stat-value">{{ $stats['recent_runs'] }}</div>
-        </div>
-    </div>
+        try {
+            $this->registerTempConnection($connectionName, $record);
 
-    <div class="two-col-grid">
-        <div class="panel-card">
-            <h3>Source Database Tables</h3>
+            $tables = DB::connection($connectionName)->select(
+                "select table_name
+                 from information_schema.tables
+                 where table_schema = ?
+                 and table_type = 'BASE TABLE'
+                 order by table_name asc",
+                [$record['schema_name']]
+            );
 
-            @if (!empty($sourceInfo['tables']))
-                <div class="detail-list">
-                    @foreach ($sourceInfo['tables'] as $table)
-                        <div class="detail-row">
-                            <span class="detail-label">{{ $loop->iteration }}</span>
-                            <span class="detail-value" style="text-align:left;">{{ $table }}</span>
-                        </div>
-                    @endforeach
-                </div>
-            @else
-                <div class="empty-box">{{ $sourceInfo['message'] ?? 'No source tables found.' }}</div>
-            @endif
-        </div>
+            return [
+                'status' => 'connected',
+                'message' => 'Connection successful.',
+                'tables' => collect($tables)->pluck('table_name')->toArray(),
+                'schema_name' => $record['schema_name'],
+                'database_name' => $record['database_name'],
+            ];
+        } catch (Throwable $e) {
+            return [
+                'status' => 'failed',
+                'message' => $e->getMessage(),
+                'tables' => [],
+                'schema_name' => $record['schema_name'] ?? 'public',
+                'database_name' => $record['database_name'] ?? '-',
+            ];
+        } finally {
+            DB::disconnect($connectionName);
+            DB::purge($connectionName);
+        }
+    }
 
-        <div class="panel-card">
-            <h3>Destination Database Tables</h3>
+    private function resolveSavedConnection(string $type): array
+    {
+        $defaults = $type === 'source'
+            ? [
+                'name' => 'Source Supabase',
+                'connection_type' => 'source',
+                'host' => env('SRC_PG_HOST'),
+                'port' => env('SRC_PG_PORT', 5432),
+                'database_name' => env('SRC_PG_DATABASE', 'postgres'),
+                'username' => env('SRC_PG_USERNAME', 'postgres'),
+                'password' => env('SRC_PG_PASSWORD', ''),
+                'schema_name' => env('SRC_PG_SCHEMA', 'public'),
+                'sslmode' => env('SRC_PG_SSLMODE', 'require'),
+            ]
+            : [
+                'name' => 'Destination Database',
+                'connection_type' => 'destination',
+                'host' => env('DST_PG_HOST'),
+                'port' => env('DST_PG_PORT', 5432),
+                'database_name' => env('DST_PG_DATABASE', 'postgres'),
+                'username' => env('DST_PG_USERNAME', 'postgres'),
+                'password' => env('DST_PG_PASSWORD', ''),
+                'schema_name' => env('DST_PG_SCHEMA', 'public'),
+                'sslmode' => env('DST_PG_SSLMODE', 'disable'),
+            ];
 
-            @if (!empty($destinationInfo['tables']))
-                <div class="detail-list">
-                    @foreach ($destinationInfo['tables'] as $table)
-                        <div class="detail-row">
-                            <span class="detail-label">{{ $loop->iteration }}</span>
-                            <span class="detail-value" style="text-align:left;">{{ $table }}</span>
-                        </div>
-                    @endforeach
-                </div>
-            @else
-                <div class="empty-box">{{ $destinationInfo['message'] ?? 'No destination tables found.' }}</div>
-            @endif
-        </div>
-    </div>
+        if (! Schema::hasTable('sync_connections')) {
+            return $defaults;
+        }
 
-    <div class="form-card" style="margin-bottom:22px;">
-        <h3>Create / Update Manual Transfer Mapping</h3>
+        $record = DB::table('sync_connections')
+            ->where('connection_type', $type)
+            ->first();
 
-        <div class="direction-box">
-            Choose the transfer direction first.
-            If you choose <strong>Destination → Source</strong>, data will be read from the destination table and inserted
-            into the source table.
-        </div>
+        if (! $record) {
+            return $defaults;
+        }
 
-        <form action="{{ route('admin.sync-jobs.save-mapping') }}" method="POST">
-            @csrf
+        return [
+            'name' => $record->name ?? $defaults['name'],
+            'connection_type' => $record->connection_type ?? $type,
+            'host' => $record->host ?? $defaults['host'],
+            'port' => $record->port ?? $defaults['port'],
+            'database_name' => $record->database_name ?? $defaults['database_name'],
+            'username' => $record->username ?? $defaults['username'],
+            'password' => !empty($record->password_encrypted)
+                ? Crypt::decryptString($record->password_encrypted)
+                : $defaults['password'],
+            'schema_name' => $record->schema_name ?? $defaults['schema_name'],
+            'sslmode' => $record->sslmode ?? $defaults['sslmode'],
+        ];
+    }
 
-            <div class="form-grid">
-                <div class="form-group">
-                    <label class="form-label">Mapping Name</label>
-                    <input type="text" name="name" class="form-control"
-                        placeholder="Example: Tasks Destination to Source" required>
-                </div>
+    private function registerTempConnection(string $connectionName, array $record): void
+    {
+        config([
+            "database.connections.$connectionName" => [
+                'driver' => 'pgsql',
+                'host' => $record['host'],
+                'port' => $record['port'],
+                'database' => $record['database_name'],
+                'username' => $record['username'],
+                'password' => $record['password'],
+                'charset' => 'utf8',
+                'prefix' => '',
+                'prefix_indexes' => true,
+                'search_path' => $record['schema_name'],
+                'schema' => $record['schema_name'],
+                'sslmode' => $record['sslmode'],
+            ],
+        ]);
 
-                <div class="form-group">
-                    <label class="form-label">Transfer Direction</label>
-                    <select name="transfer_direction" class="form-select" required>
-                        <option value="source_to_destination">Source → Destination</option>
-                        <option value="destination_to_source">Destination → Source</option>
-                    </select>
-                    <div class="form-note">Select how data should move.</div>
-                </div>
+        DB::purge($connectionName);
+    }
 
-                <div class="form-group">
-                    <label class="form-label">Sync Mode</label>
-                    <select name="sync_mode" class="form-select" required>
-                        <option value="mirror">Mirror (clear target table, then copy)</option>
-                        <option value="append">Append (insert only)</option>
-                    </select>
-                </div>
+    private function getTableColumns(string $connectionName, string $schemaName, string $tableName): array
+    {
+        $columns = DB::connection($connectionName)->select(
+            "select column_name
+             from information_schema.columns
+             where table_schema = ?
+             and table_name = ?
+             order by ordinal_position asc",
+            [$schemaName, $tableName]
+        );
 
-                <div class="form-group">
-                    <label class="form-label">Primary Key Column</label>
-                    <input type="text" name="primary_key_column" class="form-control" placeholder="Example: id">
-                </div>
+        return collect($columns)->pluck('column_name')->toArray();
+    }
 
-                <div class="form-group">
-                    <label class="form-label">Source Table</label>
-                    <select name="source_table_name" class="form-select" required>
-                        <option value="">Select source table</option>
-                        @foreach ($sourceInfo['tables'] ?? [] as $table)
-                            <option value="{{ $table }}">{{ $table }}</option>
-                        @endforeach
-                    </select>
-                    <div class="form-note">Used as target when direction is Destination → Source.</div>
-                </div>
+    private function createRunLog(int $runId, string $level, string $message, array $context = []): void
+    {
+        SyncRunLog::create([
+            'sync_run_id' => $runId,
+            'level' => $level,
+            'message' => $message,
+            'context' => empty($context) ? null : $context,
+        ]);
+    }
 
-                <div class="form-group">
-                    <label class="form-label">Destination Table</label>
-                    <select name="destination_table_name" class="form-select" required>
-                        <option value="">Select destination table</option>
-                        @foreach ($destinationInfo['tables'] ?? [] as $table)
-                            <option value="{{ $table }}">{{ $table }}</option>
-                        @endforeach
-                    </select>
-                    <div class="form-note">Used as source when direction is Destination → Source.</div>
-                </div>
+    private function normalizeCsvText(?string $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
 
-                <div class="form-group full">
-                    <label class="form-label">Selected Columns</label>
-                    <input type="text" name="selected_columns" class="form-control"
-                        placeholder="Example: id, title, status, created_at">
-                    <div class="form-note">Optional. Leave blank to use all common columns between both tables.</div>
-                </div>
+        $items = collect(explode(',', $value))
+            ->map(fn ($item) => trim($item))
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
 
-                <div class="form-group full">
-                    <label class="form-label">Notes</label>
-                    <textarea name="notes" class="form-textarea" placeholder="Optional transfer notes"></textarea>
-                </div>
+        return empty($items) ? null : implode(', ', $items);
+    }
 
-                <div class="form-group full">
-                    <label class="form-label">Options</label>
-                    <div class="checkbox-row">
-                        <label class="check-item">
-                            <input type="checkbox" name="is_active" value="1" checked>
-                            Active Mapping
-                        </label>
-                    </div>
-                </div>
-            </div>
+    private function currentAdminId(): ?int
+    {
+        $adminId = session('admin_id');
 
-            <div class="action-row">
-                <button type="submit" class="btn btn-primary">Save Mapping</button>
-            </div>
-        </form>
-    </div>
+        if ($adminId === null || $adminId === '') {
+            return null;
+        }
 
-    <div class="table-card" style="margin-bottom:22px;">
-        <h3>Saved Transfer Mappings</h3>
-
-        @if ($mappings->count())
-            <div class="table-wrapper">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Name</th>
-                            <th>Direction</th>
-                            <th>Source Table</th>
-                            <th>Destination Table</th>
-                            <th>Mode</th>
-                            <th>Status</th>
-                            <th>Last Synced</th>
-                            <th>Action</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        @foreach ($mappings as $row)
-                            <tr>
-                                <td>{{ $row->id }}</td>
-                                <td>{{ $row->name }}</td>
-                                <td>
-                                    <span class="badge">
-                                        {{ ($row->transfer_direction ?? 'source_to_destination') === 'destination_to_source' ? 'Destination → Source' : 'Source → Destination' }}
-                                    </span>
-                                </td>
-                                <td>{{ $row->source_table_name }}</td>
-                                <td>{{ $row->destination_table_name }}</td>
-                                <td>{{ $row->sync_mode }}</td>
-                                <td>{{ $row->last_sync_status ?? '-' }}</td>
-                                <td>{{ $row->last_synced_at ?? '-' }}</td>
-                                <td>
-                                    <form action="{{ route('admin.sync-jobs.run') }}" method="POST">
-                                        @csrf
-                                        <input type="hidden" name="mapping_id" value="{{ $row->id }}">
-                                        <button type="submit" class="btn btn-success">Run Transfer</button>
-                                    </form>
-                                </td>
-                            </tr>
-                        @endforeach
-                    </tbody>
-                </table>
-            </div>
-        @else
-            <div class="empty-box">No transfer mappings found.</div>
-        @endif
-    </div>
-
-    <div class="table-card" style="margin-bottom:22px;">
-        <h3>Recent Transfer Runs</h3>
-
-        @if ($recentRuns->count())
-            <div class="table-wrapper">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Module</th>
-                            <th>Run Type</th>
-                            <th>Source Table</th>
-                            <th>Destination Table</th>
-                            <th>Status</th>
-                            <th>Rows</th>
-                            <th>Started At</th>
-                            <th>Ended At</th>
-                            <th>Message</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        @foreach ($recentRuns as $row)
-                            <tr>
-                                <td>{{ $row->id }}</td>
-                                <td>{{ $row->module_name ?? '-' }}</td>
-                                <td>{{ $row->run_type ?? '-' }}</td>
-                                <td>{{ $row->source_table_name ?? '-' }}</td>
-                                <td>{{ $row->destination_table_name ?? '-' }}</td>
-                                <td>{{ $row->status ?? '-' }}</td>
-                                <td>{{ $row->records_processed ?? 0 }}</td>
-                                <td>{{ $row->started_at ?? '-' }}</td>
-                                <td>{{ $row->ended_at ?? '-' }}</td>
-                                <td>{{ $row->message ?? '-' }}</td>
-                            </tr>
-                        @endforeach
-                    </tbody>
-                </table>
-            </div>
-        @else
-            <div class="empty-box">No transfer runs found.</div>
-        @endif
-    </div>
-
-    <div class="table-card">
-        <h3>Recent Transfer Logs</h3>
-
-        @if ($recentLogs->count())
-            <div class="table-wrapper">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Run ID</th>
-                            <th>Level</th>
-                            <th>Message</th>
-                            <th>Context</th>
-                            <th>Created At</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        @foreach ($recentLogs as $row)
-                            <tr>
-                                <td>{{ $row->id }}</td>
-                                <td>{{ $row->sync_run_id ?? '-' }}</td>
-                                <td>{{ $row->level ?? '-' }}</td>
-                                <td>{{ $row->message ?? '-' }}</td>
-                                <td>
-                                    @if (!empty($row->context))
-                                        <pre style="white-space:pre-wrap; margin:0;">{{ json_encode($row->context, JSON_PRETTY_PRINT) }}</pre>
-                                    @else
-                                        -
-                                    @endif
-                                </td>
-                                <td>{{ $row->created_at ?? '-' }}</td>
-                            </tr>
-                        @endforeach
-                    </tbody>
-                </table>
-            </div>
-        @else
-            <div class="empty-box">No transfer logs found.</div>
-        @endif
-    </div>
-@endsection
+        return is_numeric($adminId) ? (int) $adminId : null;
+    }
+}
