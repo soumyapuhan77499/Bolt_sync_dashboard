@@ -5,504 +5,563 @@ namespace App\Http\Controllers\Admin;
 use App\Http\Controllers\Controller;
 use App\Models\SchemaSnapshot;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Schema as LaravelSchema;
+use Illuminate\Support\Facades\Schema;
 use Throwable;
 
 class SchemaController extends Controller
 {
     public function index(Request $request)
     {
-        $fromTarget = $request->input('from_target', 'source');
-        $toTarget = $request->input('to_target', 'destination');
-
-        $liveSchemas = [
-            'source' => $this->safeCaptureSchema('source'),
-            'destination' => $this->safeCaptureSchema('destination'),
-            'admin' => $this->safeCaptureSchema('admin'),
-        ];
-
-        $diffResult = null;
-        if (
-            isset($liveSchemas[$fromTarget], $liveSchemas[$toTarget]) &&
-            $liveSchemas[$fromTarget]['status'] === 'connected' &&
-            $liveSchemas[$toTarget]['status'] === 'connected'
-        ) {
-            $diffResult = $this->compareSchemas(
-                $liveSchemas[$fromTarget]['snapshot'],
-                $liveSchemas[$toTarget]['snapshot']
-            );
-        }
-
-        $recentSnapshots = SchemaSnapshot::latest()->limit(20)->get();
-
-        return view('admin.schema.index', [
-            'liveSchemas'      => $liveSchemas,
-            'fromTarget'       => $fromTarget,
-            'toTarget'         => $toTarget,
-            'diffResult'       => $diffResult,
-            'recentSnapshots'  => $recentSnapshots,
-        ]);
+        return $this->renderPage();
     }
 
     public function snapshot(Request $request)
     {
-        $validated = $request->validate([
+        $request->validate([
             'target_name' => ['required', 'in:source,destination,admin'],
             'notes' => ['nullable', 'string'],
         ]);
 
-        $result = $this->safeCaptureSchema($validated['target_name']);
+        $target = $request->target_name;
+        $live = $this->buildLiveSchema($target);
 
-        if ($result['status'] !== 'connected') {
-            return back()->with('error', 'Snapshot failed: ' . $result['message']);
+        if (($live['status'] ?? 'failed') !== 'connected') {
+            return back()->with('error', 'Snapshot failed: ' . ($live['message'] ?? 'Unable to read schema.'));
         }
 
-        $snapshot = $result['snapshot'];
+        $snapshot = $live['snapshot'];
 
         SchemaSnapshot::create([
-            'target_name'   => $validated['target_name'],
-            'database_name' => $snapshot['database_name'],
-            'schema_name'   => $snapshot['schema_name'],
+            'target_name' => $target,
+            'database_name' => $snapshot['database_name'] ?? '-',
+            'schema_name' => $snapshot['schema_name'] ?? 'public',
             'snapshot_data' => $snapshot,
-            'notes'         => $validated['notes'] ?? null,
-            'created_by'    => session('admin_user_id'),
+            'notes' => $request->notes,
+            'created_by' => session('admin_user_id'),
         ]);
 
-        return back()->with('success', ucfirst($validated['target_name']) . ' schema snapshot created successfully.');
+        return back()->with('success', ucfirst($target) . ' snapshot created successfully.');
     }
 
     public function diff(Request $request)
     {
-        $validated = $request->validate([
+        $request->validate([
             'from_target' => ['required', 'in:source,destination,admin'],
-            'to_target'   => ['required', 'in:source,destination,admin'],
+            'to_target' => ['required', 'in:source,destination,admin'],
         ]);
 
-        return redirect()->route('admin.schema.index', [
-            'from_target' => $validated['from_target'],
-            'to_target'   => $validated['to_target'],
-        ]);
+        $fromTarget = $request->from_target;
+        $toTarget = $request->to_target;
+
+        $liveSchemas = [
+            'source' => $this->buildLiveSchema('source'),
+            'destination' => $this->buildLiveSchema('destination'),
+            'admin' => $this->buildLiveSchema('admin'),
+        ];
+
+        if (($liveSchemas[$fromTarget]['status'] ?? 'failed') !== 'connected') {
+            return back()->with('error', ucfirst($fromTarget) . ' schema connection failed.');
+        }
+
+        if (($liveSchemas[$toTarget]['status'] ?? 'failed') !== 'connected') {
+            return back()->with('error', ucfirst($toTarget) . ' schema connection failed.');
+        }
+
+        $diffResult = $this->compareSchemas(
+            $liveSchemas[$fromTarget]['snapshot'],
+            $liveSchemas[$toTarget]['snapshot'],
+            $fromTarget,
+            $toTarget
+        );
+
+        return $this->renderPage($diffResult, $fromTarget, $toTarget, $liveSchemas);
     }
 
     public function apply(Request $request)
     {
-        $validated = $request->validate([
-            'from_target' => ['required', 'in:source,admin,destination'],
-            'to_target'   => ['required', 'in:destination,admin'],
-            'execute'     => ['nullable', 'boolean'],
+        $request->validate([
+            'from_target' => ['required', 'in:source,destination,admin'],
+            'to_target' => ['required', 'in:source,destination,admin'],
         ]);
 
-        if ($validated['from_target'] === $validated['to_target']) {
-            return back()->with('error', 'Source and destination target cannot be the same.');
+        $fromTarget = $request->from_target;
+        $toTarget = $request->to_target;
+
+        $fromLive = $this->buildLiveSchema($fromTarget);
+        $toLive = $this->buildLiveSchema($toTarget);
+
+        if (($fromLive['status'] ?? 'failed') !== 'connected') {
+            return back()->with('error', ucfirst($fromTarget) . ' schema connection failed.');
         }
 
-        $from = $this->safeCaptureSchema($validated['from_target']);
-        $to = $this->safeCaptureSchema($validated['to_target']);
-
-        if ($from['status'] !== 'connected') {
-            return back()->with('error', 'Source schema load failed: ' . $from['message']);
+        if (($toLive['status'] ?? 'failed') !== 'connected') {
+            return back()->with('error', ucfirst($toTarget) . ' schema connection failed.');
         }
 
-        if ($to['status'] !== 'connected') {
-            return back()->with('error', 'Destination schema load failed: ' . $to['message']);
-        }
-
-        $sqlStatements = $this->buildApplySql(
-            $from['snapshot'],
-            $to['snapshot']
+        $diffResult = $this->compareSchemas(
+            $fromLive['snapshot'],
+            $toLive['snapshot'],
+            $fromTarget,
+            $toTarget
         );
 
-        if (empty($sqlStatements)) {
-            return back()->with('success', 'No schema changes needed.')->with('generated_schema_sql', '-- No changes required');
+        [$statements, $sqlText] = $this->generateSchemaStatements(
+            $fromLive['snapshot'],
+            $toLive['snapshot'],
+            $diffResult
+        );
+
+        if (empty($statements)) {
+            return back()
+                ->with('success', 'No missing tables or columns found to apply.')
+                ->with('generated_schema_sql', '-- No schema changes required.');
         }
 
-        if ($request->boolean('execute', true)) {
-            $this->executeSqlOnTarget($validated['to_target'], $sqlStatements);
+        $targetConnection = $this->resolveConnectionConfig($toTarget);
+        $connectionName = 'schema_apply_target';
+
+        try {
+            $this->registerTempConnection($connectionName, $targetConnection);
+
+            DB::connection($connectionName)->beginTransaction();
+
+            foreach ($statements as $statement) {
+                DB::connection($connectionName)->statement($statement);
+            }
+
+            DB::connection($connectionName)->commit();
 
             return back()
-                ->with('success', 'Schema changes applied successfully.')
-                ->with('generated_schema_sql', implode(";\n\n", $sqlStatements) . ';');
-        }
-
-        return back()
-            ->with('success', 'Schema SQL generated successfully.')
-            ->with('generated_schema_sql', implode(";\n\n", $sqlStatements) . ';');
-    }
-
-    private function safeCaptureSchema(string $target): array
-    {
-        try {
-            $snapshot = $this->captureSchema($target);
-
-            return [
-                'status'  => 'connected',
-                'message' => 'Connected successfully.',
-                'snapshot'=> $snapshot,
-            ];
+                ->with('success', 'Missing tables/columns applied successfully.')
+                ->with('generated_schema_sql', $sqlText);
         } catch (Throwable $e) {
-            return [
-                'status'  => 'failed',
-                'message' => $e->getMessage(),
-                'snapshot'=> null,
-            ];
-        }
-    }
+            try {
+                DB::connection($connectionName)->rollBack();
+            } catch (Throwable $rollbackException) {
+            }
 
-    private function captureSchema(string $target): array
-    {
-        $resolved = $this->resolveConnection($target);
-        $connectionName = $resolved['connection_name'];
-
-        if ($resolved['temporary']) {
-            config(["database.connections.{$connectionName}" => $resolved['config']]);
+            return back()
+                ->with('error', 'Schema apply failed: ' . $e->getMessage())
+                ->with('generated_schema_sql', $sqlText);
+        } finally {
+            DB::disconnect($connectionName);
             DB::purge($connectionName);
         }
+    }
+
+    private function renderPage(
+        ?array $diffResult = null,
+        string $fromTarget = 'source',
+        string $toTarget = 'destination',
+        ?array $liveSchemas = null
+    ) {
+        $liveSchemas = $liveSchemas ?: [
+            'source' => $this->buildLiveSchema('source'),
+            'destination' => $this->buildLiveSchema('destination'),
+            'admin' => $this->buildLiveSchema('admin'),
+        ];
+
+        $recentSnapshots = SchemaSnapshot::orderByDesc('id')->limit(20)->get();
+
+        return view('admin.schema.index', compact(
+            'liveSchemas',
+            'recentSnapshots',
+            'diffResult',
+            'fromTarget',
+            'toTarget'
+        ));
+    }
+
+    private function buildLiveSchema(string $target): array
+    {
+        $config = $this->resolveConnectionConfig($target);
+
+        if (empty($config['host']) || empty($config['database_name']) || empty($config['username'])) {
+            return [
+                'status' => 'failed',
+                'message' => ucfirst($target) . ' connection is incomplete.',
+                'snapshot' => [
+                    'target_name' => $target,
+                    'database_name' => '-',
+                    'schema_name' => $config['schema_name'] ?? 'public',
+                    'tables_count' => 0,
+                    'columns_count' => 0,
+                    'tables' => [],
+                ],
+            ];
+        }
+
+        $connectionName = 'schema_live_' . $target . '_' . uniqid();
 
         try {
-            $databaseRow = DB::connection($connectionName)
-                ->selectOne('select current_database() as database_name');
+            $this->registerTempConnection($connectionName, $config);
 
-            $schemaName = $resolved['schema_name'];
+            $databaseRow = DB::connection($connectionName)->selectOne(
+                'select current_database() as database_name'
+            );
 
-            $tables = DB::connection($connectionName)->select(
+            $tableRows = DB::connection($connectionName)->select(
                 "select table_name
                  from information_schema.tables
                  where table_schema = ?
                  and table_type = 'BASE TABLE'
                  order by table_name asc",
-                [$schemaName]
+                [$config['schema_name']]
             );
 
-            $tableMap = [];
+            $columnRows = DB::connection($connectionName)->select(
+                "select
+                    table_name,
+                    column_name,
+                    data_type,
+                    udt_name,
+                    character_maximum_length,
+                    numeric_precision,
+                    numeric_scale,
+                    datetime_precision,
+                    is_nullable,
+                    column_default,
+                    ordinal_position
+                 from information_schema.columns
+                 where table_schema = ?
+                 order by table_name asc, ordinal_position asc",
+                [$config['schema_name']]
+            );
 
-            foreach ($tables as $tableRow) {
+            $primaryKeyRows = DB::connection($connectionName)->select(
+                "select
+                    kcu.table_name,
+                    kcu.column_name
+                 from information_schema.table_constraints tc
+                 join information_schema.key_column_usage kcu
+                   on tc.constraint_name = kcu.constraint_name
+                  and tc.table_schema = kcu.table_schema
+                 where tc.constraint_type = 'PRIMARY KEY'
+                   and tc.table_schema = ?
+                 order by kcu.table_name asc, kcu.ordinal_position asc",
+                [$config['schema_name']]
+            );
+
+            $primaryMap = [];
+            foreach ($primaryKeyRows as $pk) {
+                $primaryMap[$pk->table_name][] = $pk->column_name;
+            }
+
+            $columnsByTable = [];
+            foreach ($columnRows as $column) {
+                $columnsByTable[$column->table_name][] = [
+                    'column_name' => $column->column_name,
+                    'data_type' => $column->data_type,
+                    'udt_name' => $column->udt_name,
+                    'character_maximum_length' => $column->character_maximum_length,
+                    'numeric_precision' => $column->numeric_precision,
+                    'numeric_scale' => $column->numeric_scale,
+                    'datetime_precision' => $column->datetime_precision,
+                    'is_nullable' => $column->is_nullable,
+                    'column_default' => $column->column_default,
+                    'ordinal_position' => $column->ordinal_position,
+                    'is_primary' => in_array($column->column_name, $primaryMap[$column->table_name] ?? [], true),
+                ];
+            }
+
+            $tables = [];
+            $columnsCount = 0;
+
+            foreach ($tableRows as $tableRow) {
                 $tableName = $tableRow->table_name;
+                $tableColumns = $columnsByTable[$tableName] ?? [];
+                $columnsCount += count($tableColumns);
 
-                $columns = DB::connection($connectionName)->select(
-                    "select
-                        column_name,
-                        data_type,
-                        udt_name,
-                        is_nullable,
-                        column_default,
-                        character_maximum_length,
-                        numeric_precision,
-                        numeric_scale,
-                        datetime_precision,
-                        ordinal_position
-                     from information_schema.columns
-                     where table_schema = ?
-                     and table_name = ?
-                     order by ordinal_position asc",
-                    [$schemaName, $tableName]
-                );
-
-                $primaryKeys = DB::connection($connectionName)->select(
-                    "select kcu.column_name
-                     from information_schema.table_constraints tc
-                     join information_schema.key_column_usage kcu
-                       on tc.constraint_name = kcu.constraint_name
-                      and tc.table_schema = kcu.table_schema
-                     where tc.table_schema = ?
-                       and tc.table_name = ?
-                       and tc.constraint_type = 'PRIMARY KEY'
-                     order by kcu.ordinal_position asc",
-                    [$schemaName, $tableName]
-                );
-
-                $columnMap = [];
-                foreach ($columns as $column) {
-                    $columnMap[$column->column_name] = [
-                        'column_name'              => $column->column_name,
-                        'data_type'                => $column->data_type,
-                        'udt_name'                 => $column->udt_name,
-                        'is_nullable'              => $column->is_nullable,
-                        'column_default'           => $column->column_default,
-                        'character_maximum_length' => $column->character_maximum_length,
-                        'numeric_precision'        => $column->numeric_precision,
-                        'numeric_scale'            => $column->numeric_scale,
-                        'datetime_precision'       => $column->datetime_precision,
-                        'ordinal_position'         => $column->ordinal_position,
-                    ];
-                }
-
-                $tableMap[$tableName] = [
-                    'table_name'   => $tableName,
-                    'columns'      => $columnMap,
-                    'primary_keys' => collect($primaryKeys)->pluck('column_name')->toArray(),
+                $tables[] = [
+                    'table_name' => $tableName,
+                    'columns_count' => count($tableColumns),
+                    'columns' => $tableColumns,
                 ];
             }
 
             return [
-                'target_name'    => $target,
-                'database_name'  => $databaseRow->database_name ?? '-',
-                'schema_name'    => $schemaName,
-                'captured_at'    => now()->toDateTimeString(),
-                'tables'         => $tableMap,
-                'tables_count'   => count($tableMap),
-            ];
-        } finally {
-            if ($resolved['temporary']) {
-                DB::disconnect($connectionName);
-                DB::purge($connectionName);
-            }
-        }
-    }
-
-    private function resolveConnection(string $target): array
-    {
-        if ($target === 'admin') {
-            return [
-                'temporary'      => false,
-                'connection_name'=> config('database.default'),
-                'schema_name'    => env('DB_SCHEMA', 'public'),
-                'config'         => [],
-            ];
-        }
-
-        if ($target === 'source') {
-            return [
-                'temporary'      => true,
-                'connection_name'=> 'schema_source_pg',
-                'schema_name'    => env('SRC_PG_SCHEMA', 'public'),
-                'config'         => [
-                    'driver' => 'pgsql',
-                    'host' => env('SRC_PG_HOST'),
-                    'port' => env('SRC_PG_PORT', 5432),
-                    'database' => env('SRC_PG_DATABASE', 'postgres'),
-                    'username' => env('SRC_PG_USERNAME', 'postgres'),
-                    'password' => env('SRC_PG_PASSWORD', ''),
-                    'charset' => 'utf8',
-                    'prefix' => '',
-                    'prefix_indexes' => true,
-                    'search_path' => env('SRC_PG_SCHEMA', 'public'),
-                    'schema' => env('SRC_PG_SCHEMA', 'public'),
-                    'sslmode' => env('SRC_PG_SSLMODE', 'require'),
+                'status' => 'connected',
+                'message' => 'Live schema loaded successfully.',
+                'snapshot' => [
+                    'target_name' => $target,
+                    'database_name' => $databaseRow->database_name ?? $config['database_name'],
+                    'schema_name' => $config['schema_name'],
+                    'tables_count' => count($tables),
+                    'columns_count' => $columnsCount,
+                    'tables' => $tables,
                 ],
             ];
+        } catch (Throwable $e) {
+            return [
+                'status' => 'failed',
+                'message' => $e->getMessage(),
+                'snapshot' => [
+                    'target_name' => $target,
+                    'database_name' => '-',
+                    'schema_name' => $config['schema_name'] ?? 'public',
+                    'tables_count' => 0,
+                    'columns_count' => 0,
+                    'tables' => [],
+                ],
+            ];
+        } finally {
+            DB::disconnect($connectionName);
+            DB::purge($connectionName);
         }
-
-        return [
-            'temporary'      => true,
-            'connection_name'=> 'schema_destination_pg',
-            'schema_name'    => env('DST_PG_SCHEMA', 'public'),
-            'config'         => [
-                'driver' => 'pgsql',
-                'host' => env('DST_PG_HOST'),
-                'port' => env('DST_PG_PORT', 5432),
-                'database' => env('DST_PG_DATABASE', 'postgres'),
-                'username' => env('DST_PG_USERNAME', 'postgres'),
-                'password' => env('DST_PG_PASSWORD', ''),
-                'charset' => 'utf8',
-                'prefix' => '',
-                'prefix_indexes' => true,
-                'search_path' => env('DST_PG_SCHEMA', 'public'),
-                'schema' => env('DST_PG_SCHEMA', 'public'),
-                'sslmode' => env('DST_PG_SSLMODE', 'disable'),
-            ],
-        ];
     }
 
-    private function compareSchemas(array $fromSnapshot, array $toSnapshot): array
+    private function compareSchemas(array $fromSnapshot, array $toSnapshot, string $fromTarget, string $toTarget): array
     {
-        $fromTables = $fromSnapshot['tables'] ?? [];
-        $toTables = $toSnapshot['tables'] ?? [];
+        $fromTables = collect($fromSnapshot['tables'] ?? [])->keyBy('table_name');
+        $toTables = collect($toSnapshot['tables'] ?? [])->keyBy('table_name');
 
-        $fromTableNames = array_keys($fromTables);
-        $toTableNames = array_keys($toTables);
+        $fromTableNames = $fromTables->keys()->all();
+        $toTableNames = $toTables->keys()->all();
 
         $missingTablesInTarget = array_values(array_diff($fromTableNames, $toTableNames));
         $extraTablesInTarget = array_values(array_diff($toTableNames, $fromTableNames));
-        $commonTables = array_values(array_intersect($fromTableNames, $toTableNames));
 
         $tableDiffs = [];
 
-        foreach ($commonTables as $tableName) {
-            $fromColumns = $fromTables[$tableName]['columns'] ?? [];
-            $toColumns = $toTables[$tableName]['columns'] ?? [];
+        foreach (array_intersect($fromTableNames, $toTableNames) as $tableName) {
+            $fromColumns = collect($fromTables[$tableName]['columns'] ?? [])->keyBy('column_name');
+            $toColumns = collect($toTables[$tableName]['columns'] ?? [])->keyBy('column_name');
 
-            $fromColumnNames = array_keys($fromColumns);
-            $toColumnNames = array_keys($toColumns);
+            $fromColumnNames = $fromColumns->keys()->all();
+            $toColumnNames = $toColumns->keys()->all();
 
             $missingColumns = array_values(array_diff($fromColumnNames, $toColumnNames));
             $extraColumns = array_values(array_diff($toColumnNames, $fromColumnNames));
+
             $changedColumns = [];
 
             foreach (array_intersect($fromColumnNames, $toColumnNames) as $columnName) {
-                if (! $this->columnsMatch($fromColumns[$columnName], $toColumns[$columnName])) {
+                $fromCol = $fromColumns[$columnName];
+                $toCol = $toColumns[$columnName];
+
+                if ($this->columnSignature($fromCol) !== $this->columnSignature($toCol)) {
                     $changedColumns[$columnName] = [
-                        'source' => $fromColumns[$columnName],
-                        'target' => $toColumns[$columnName],
+                        'source' => $fromCol,
+                        'target' => $toCol,
                     ];
                 }
             }
 
-            if (! empty($missingColumns) || ! empty($extraColumns) || ! empty($changedColumns)) {
+            if (!empty($missingColumns) || !empty($extraColumns) || !empty($changedColumns)) {
                 $tableDiffs[$tableName] = [
                     'missing_columns' => $missingColumns,
-                    'extra_columns'   => $extraColumns,
+                    'extra_columns' => $extraColumns,
                     'changed_columns' => $changedColumns,
                 ];
             }
         }
 
         return [
-            'source_target'            => $fromSnapshot['target_name'] ?? 'source',
-            'destination_target'       => $toSnapshot['target_name'] ?? 'destination',
+            'source_target' => $fromTarget,
+            'destination_target' => $toTarget,
             'missing_tables_in_target' => $missingTablesInTarget,
-            'extra_tables_in_target'   => $extraTablesInTarget,
-            'table_diffs'              => $tableDiffs,
-            'summary'                  => [
+            'extra_tables_in_target' => $extraTablesInTarget,
+            'table_diffs' => $tableDiffs,
+            'summary' => [
                 'missing_tables_count' => count($missingTablesInTarget),
-                'extra_tables_count'   => count($extraTablesInTarget),
+                'extra_tables_count' => count($extraTablesInTarget),
                 'changed_tables_count' => count($tableDiffs),
             ],
         ];
     }
 
-    private function columnsMatch(array $source, array $target): bool
+    private function columnSignature(array $column): string
     {
-        return $this->buildColumnType($source) === $this->buildColumnType($target)
-            && ($source['is_nullable'] ?? 'YES') === ($target['is_nullable'] ?? 'YES')
-            && trim((string) ($source['column_default'] ?? '')) === trim((string) ($target['column_default'] ?? ''));
+        return json_encode([
+            'data_type' => $column['data_type'] ?? null,
+            'udt_name' => $column['udt_name'] ?? null,
+            'character_maximum_length' => $column['character_maximum_length'] ?? null,
+            'numeric_precision' => $column['numeric_precision'] ?? null,
+            'numeric_scale' => $column['numeric_scale'] ?? null,
+            'datetime_precision' => $column['datetime_precision'] ?? null,
+            'is_nullable' => $column['is_nullable'] ?? null,
+            'column_default' => $column['column_default'] ?? null,
+            'is_primary' => $column['is_primary'] ?? false,
+        ]);
     }
 
-    private function buildApplySql(array $fromSnapshot, array $toSnapshot): array
+    private function generateSchemaStatements(array $fromSnapshot, array $toSnapshot, array $diffResult): array
     {
-        $sql = [];
-        $schemaName = $toSnapshot['schema_name'] ?? 'public';
+        $fromTables = collect($fromSnapshot['tables'] ?? [])->keyBy('table_name');
 
-        $fromTables = $fromSnapshot['tables'] ?? [];
-        $toTables = $toSnapshot['tables'] ?? [];
+        $statements = [];
 
-        foreach ($fromTables as $tableName => $tableMeta) {
-            if (! array_key_exists($tableName, $toTables)) {
-                $sql[] = $this->buildCreateTableSql($schemaName, $tableMeta);
+        foreach ($diffResult['missing_tables_in_target'] ?? [] as $tableName) {
+            $table = $fromTables[$tableName] ?? null;
+            if (!$table) {
                 continue;
             }
 
-            $sourceColumns = $tableMeta['columns'] ?? [];
-            $targetColumns = $toTables[$tableName]['columns'] ?? [];
+            $columnSql = collect($table['columns'] ?? [])
+                ->map(fn ($column) => $this->buildColumnSql($column, true))
+                ->implode(",\n    ");
 
-            foreach ($sourceColumns as $columnName => $columnMeta) {
-                if (! array_key_exists($columnName, $targetColumns)) {
-                    $sql[] = sprintf(
-                        'alter table %s.%s add column %s',
-                        $this->quoteIdentifier($schemaName),
-                        $this->quoteIdentifier($tableName),
-                        $this->buildColumnDefinition($columnMeta)
-                    );
+            if (!empty($columnSql)) {
+                $statements[] = 'create table "' . $tableName . "\" (\n    " . $columnSql . "\n)";
+            }
+        }
+
+        foreach (($diffResult['table_diffs'] ?? []) as $tableName => $meta) {
+            $fromColumns = collect(($fromTables[$tableName]['columns'] ?? []))->keyBy('column_name');
+
+            foreach (($meta['missing_columns'] ?? []) as $columnName) {
+                $column = $fromColumns[$columnName] ?? null;
+                if (!$column) {
+                    continue;
+                }
+
+                $statements[] = 'alter table "' . $tableName . '" add column ' . $this->buildColumnSql($column, false);
+            }
+        }
+
+        $sqlText = empty($statements)
+            ? '-- No missing tables or columns found.'
+            : implode(";\n\n", $statements) . ';';
+
+        if (!empty($diffResult['table_diffs'])) {
+            $sqlText .= "\n\n-- Changed columns below need manual review.\n";
+            foreach ($diffResult['table_diffs'] as $tableName => $meta) {
+                foreach (($meta['changed_columns'] ?? []) as $columnName => $columnDiff) {
+                    $sqlText .= '-- ' . $tableName . '.' . $columnName . ' differs between source and target.' . "\n";
                 }
             }
         }
 
-        return $sql;
+        return [$statements, $sqlText];
     }
 
-    private function buildCreateTableSql(string $schemaName, array $tableMeta): string
+    private function buildColumnSql(array $column, bool $includePrimaryKey = true): string
     {
-        $columnSql = [];
-        foreach (($tableMeta['columns'] ?? []) as $column) {
-            $columnSql[] = $this->buildColumnDefinition($column);
-        }
+        $parts = [];
+        $parts[] = '"' . $column['column_name'] . '"';
+        $parts[] = $this->mapColumnType($column);
 
-        $primaryKeys = $tableMeta['primary_keys'] ?? [];
-        if (! empty($primaryKeys)) {
-            $columnSql[] = 'primary key (' . implode(', ', array_map([$this, 'quoteIdentifier'], $primaryKeys)) . ')';
-        }
-
-        return sprintf(
-            'create table %s.%s (%s)',
-            $this->quoteIdentifier($schemaName),
-            $this->quoteIdentifier($tableMeta['table_name']),
-            implode(', ', $columnSql)
-        );
-    }
-
-    private function buildColumnDefinition(array $column): string
-    {
-        $sql = $this->quoteIdentifier($column['column_name']) . ' ' . $this->buildColumnType($column);
-
-        if (! empty($column['column_default'])) {
-            $sql .= ' default ' . $column['column_default'];
+        if (!empty($column['column_default'])) {
+            $parts[] = 'default ' . $column['column_default'];
         }
 
         if (($column['is_nullable'] ?? 'YES') === 'NO') {
-            $sql .= ' not null';
+            $parts[] = 'not null';
         }
 
-        return $sql;
+        if ($includePrimaryKey && !empty($column['is_primary'])) {
+            $parts[] = 'primary key';
+        }
+
+        return implode(' ', $parts);
     }
 
-    private function buildColumnType(array $column): string
+    private function mapColumnType(array $column): string
     {
-        $dataType = $column['data_type'] ?? 'text';
+        $type = strtolower((string) ($column['data_type'] ?? 'text'));
+        $udtName = strtolower((string) ($column['udt_name'] ?? ''));
+        $length = $column['character_maximum_length'] ?? null;
+        $precision = $column['numeric_precision'] ?? null;
+        $scale = $column['numeric_scale'] ?? null;
 
-        return match ($dataType) {
-            'character varying', 'varchar' => ! empty($column['character_maximum_length'])
-                ? 'varchar(' . $column['character_maximum_length'] . ')'
-                : 'varchar',
-
-            'character', 'char' => ! empty($column['character_maximum_length'])
-                ? 'char(' . $column['character_maximum_length'] . ')'
-                : 'char',
-
-            'numeric', 'decimal' => (! empty($column['numeric_precision']) && $column['numeric_scale'] !== null)
-                ? 'numeric(' . $column['numeric_precision'] . ',' . $column['numeric_scale'] . ')'
-                : 'numeric',
-
-            'timestamp without time zone' => ! empty($column['datetime_precision'])
-                ? 'timestamp(' . $column['datetime_precision'] . ') without time zone'
-                : 'timestamp without time zone',
-
-            'timestamp with time zone' => ! empty($column['datetime_precision'])
-                ? 'timestamp(' . $column['datetime_precision'] . ') with time zone'
-                : 'timestamp with time zone',
-
-            'time without time zone' => ! empty($column['datetime_precision'])
-                ? 'time(' . $column['datetime_precision'] . ') without time zone'
-                : 'time without time zone',
-
-            'time with time zone' => ! empty($column['datetime_precision'])
-                ? 'time(' . $column['datetime_precision'] . ') with time zone'
-                : 'time with time zone',
-
-            default => $dataType,
+        return match ($type) {
+            'character varying' => $length ? "varchar({$length})" : 'varchar',
+            'character' => $length ? "char({$length})" : 'char',
+            'timestamp without time zone' => 'timestamp',
+            'timestamp with time zone' => 'timestamptz',
+            'time without time zone' => 'time',
+            'time with time zone' => 'timetz',
+            'numeric' => ($precision && $scale !== null) ? "numeric({$precision},{$scale})" : 'numeric',
+            'array' => ltrim($udtName, '_') . '[]',
+            'USER-DEFINED' => $udtName ?: 'text',
+            default => $type ?: ($udtName ?: 'text'),
         };
     }
 
-    private function executeSqlOnTarget(string $target, array $sqlStatements): void
+    private function resolveConnectionConfig(string $target): array
     {
-        $resolved = $this->resolveConnection($target);
-        $connectionName = $resolved['connection_name'];
-
-        if ($resolved['temporary']) {
-            config(["database.connections.{$connectionName}" => $resolved['config']]);
-            DB::purge($connectionName);
+        if ($target === 'admin') {
+            return [
+                'name' => 'Admin Database',
+                'host' => env('DB_HOST'),
+                'port' => env('DB_PORT', 5432),
+                'database_name' => env('DB_DATABASE', 'postgres'),
+                'username' => env('DB_USERNAME', 'postgres'),
+                'password' => env('DB_PASSWORD', ''),
+                'schema_name' => env('DB_SCHEMA', 'public'),
+                'sslmode' => env('DB_SSLMODE', 'disable'),
+            ];
         }
 
-        try {
-            DB::connection($connectionName)->beginTransaction();
+        $defaults = $target === 'source'
+            ? [
+                'name' => 'Source Database',
+                'host' => env('SRC_PG_HOST'),
+                'port' => env('SRC_PG_PORT', 5432),
+                'database_name' => env('SRC_PG_DATABASE', 'postgres'),
+                'username' => env('SRC_PG_USERNAME', 'postgres'),
+                'password' => env('SRC_PG_PASSWORD', ''),
+                'schema_name' => env('SRC_PG_SCHEMA', 'public'),
+                'sslmode' => env('SRC_PG_SSLMODE', 'require'),
+            ]
+            : [
+                'name' => 'Destination Database',
+                'host' => env('DST_PG_HOST'),
+                'port' => env('DST_PG_PORT', 5432),
+                'database_name' => env('DST_PG_DATABASE', 'postgres'),
+                'username' => env('DST_PG_USERNAME', 'postgres'),
+                'password' => env('DST_PG_PASSWORD', ''),
+                'schema_name' => env('DST_PG_SCHEMA', 'public'),
+                'sslmode' => env('DST_PG_SSLMODE', 'disable'),
+            ];
 
-            foreach ($sqlStatements as $statement) {
-                DB::connection($connectionName)->unprepared($statement);
-            }
-
-            DB::connection($connectionName)->commit();
-        } catch (Throwable $e) {
-            DB::connection($connectionName)->rollBack();
-            throw $e;
-        } finally {
-            if ($resolved['temporary']) {
-                DB::disconnect($connectionName);
-                DB::purge($connectionName);
-            }
+        if (!Schema::hasTable('sync_connections')) {
+            return $defaults;
         }
+
+        $record = DB::table('sync_connections')
+            ->where('connection_type', $target)
+            ->first();
+
+        if (!$record) {
+            return $defaults;
+        }
+
+        return [
+            'name' => $record->name ?? $defaults['name'],
+            'host' => $record->host ?? $defaults['host'],
+            'port' => $record->port ?? $defaults['port'],
+            'database_name' => $record->database_name ?? $defaults['database_name'],
+            'username' => $record->username ?? $defaults['username'],
+            'password' => !empty($record->password_encrypted)
+                ? Crypt::decryptString($record->password_encrypted)
+                : $defaults['password'],
+            'schema_name' => $record->schema_name ?? $defaults['schema_name'],
+            'sslmode' => $record->sslmode ?? $defaults['sslmode'],
+        ];
     }
 
-    private function quoteIdentifier(string $value): string
+    private function registerTempConnection(string $connectionName, array $config): void
     {
-        return '"' . str_replace('"', '""', $value) . '"';
+        config([
+            "database.connections.$connectionName" => [
+                'driver' => 'pgsql',
+                'host' => $config['host'],
+                'port' => $config['port'],
+                'database' => $config['database_name'],
+                'username' => $config['username'],
+                'password' => $config['password'],
+                'charset' => 'utf8',
+                'prefix' => '',
+                'prefix_indexes' => true,
+                'search_path' => $config['schema_name'],
+                'schema' => $config['schema_name'],
+                'sslmode' => $config['sslmode'],
+            ],
+        ]);
+
+        DB::purge($connectionName);
     }
 }
