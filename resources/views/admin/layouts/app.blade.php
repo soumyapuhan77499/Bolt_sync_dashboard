@@ -328,6 +328,15 @@
                             </li>
                         @endif
 
+                        @if (Route::has('admin.data-compare.index'))
+                            <li>
+                                <a href="{{ route('admin.data-compare.index') }}"
+                                    class="{{ request()->routeIs('admin.data-compare.*') ? 'active' : '' }}">
+                                    <span>Data Compare</span>
+                                </a>
+                            </li>
+                        @endif
+
                         @if (Route::has('admin.backup.index'))
                             <li>
                                 <a href="{{ route('admin.backup.index') }}"
