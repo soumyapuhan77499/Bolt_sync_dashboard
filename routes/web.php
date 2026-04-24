@@ -13,15 +13,9 @@ use App\Http\Controllers\Admin\SyncJobController;
 use App\Http\Controllers\Admin\ReplicationController;
 use App\Http\Controllers\Admin\DataCompareController;
 
-    Route::redirect('/', '/admin/login');
+Route::redirect('/', '/admin/login');
 
-
-    Route::prefix('data-compare')->name('data-compare.')->group(function () {
-        Route::get('/', [DataCompareController::class, 'index'])->name('index');
-        Route::post('/run', [DataCompareController::class, 'run'])->name('run');
-    });
-
-    Route::prefix('admin')->name('admin.')->group(function () {
+Route::prefix('admin')->name('admin.')->group(function () {
     Route::get('/login', [AuthController::class, 'showLogin'])->name('login');
     Route::post('/login', [AuthController::class, 'login'])->name('login.submit');
     Route::post('/logout', [AuthController::class, 'logout'])->name('logout');
@@ -51,11 +45,16 @@ use App\Http\Controllers\Admin\DataCompareController;
             Route::post('/run', [SyncJobController::class, 'run'])->name('run');
         });
 
+        Route::prefix('data-compare')->name('data-compare.')->group(function () {
+            Route::get('/', [DataCompareController::class, 'index'])->name('index');
+            Route::post('/run', [DataCompareController::class, 'run'])->name('run');
+        });
+
         Route::get('/backup', [BackupController::class, 'index'])->name('backup.index');
         Route::get('/health', [HealthController::class, 'index'])->name('health.index');
         Route::get('/audit-logs', [AuditLogController::class, 'index'])->name('audit.index');
 
         Route::get('/settings', [SettingController::class, 'index'])->name('settings.index');
         Route::post('/settings/save', [SettingController::class, 'save'])->name('settings.save');
-            });
+    });
 });
