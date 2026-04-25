@@ -3,7 +3,7 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
-use Illuminate\Http\Request;
+use App\Models\BackupRun;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -11,187 +11,223 @@ use Throwable;
 
 class BackupController extends Controller
 {
-    public function index(Request $request)
+    public function index()
     {
-        $sourceStatus = $this->getExternalDbStatus('source');
-        $destinationStatus = $this->getExternalDbStatus('destination');
-        $adminStatus = $this->getAdminDbStatus();
-
-        $recentBackups = $this->safeGetTableData('backup_runs', 'id', 25);
-
-        $stats = [
-            'total_backups' => $this->safeCount('backup_runs'),
-            'successful_backups' => $this->safeCountWhere('backup_runs', 'status', 'success'),
-            'failed_backups' => $this->safeCountWhere('backup_runs', 'status', 'failed'),
-            'running_backups' => $this->safeCountWhere('backup_runs', 'status', 'running'),
-        ];
+        $stats = $this->getBackupStats();
+        $sourceStatus = $this->inspectExternalConnection('source');
+        $destinationStatus = $this->inspectExternalConnection('destination');
+        $adminStatus = $this->inspectAdminConnection();
+        $recentBackups = $this->getRecentBackups();
 
         return view('admin.backup.index', compact(
+            'stats',
             'sourceStatus',
             'destinationStatus',
             'adminStatus',
-            'recentBackups',
-            'stats'
+            'recentBackups'
         ));
     }
 
-    private function getExternalDbStatus(string $type): array
+    private function getBackupStats(): array
     {
+        if (!Schema::hasTable('backup_runs')) {
+            return [
+                'total_backups' => 0,
+                'successful_backups' => 0,
+                'failed_backups' => 0,
+                'running_backups' => 0,
+            ];
+        }
+
+        return [
+            'total_backups' => BackupRun::count(),
+            'successful_backups' => BackupRun::where('status', 'success')->count(),
+            'failed_backups' => BackupRun::whereIn('status', ['failed', 'error'])->count(),
+            'running_backups' => BackupRun::where('status', 'running')->count(),
+        ];
+    }
+
+    private function getRecentBackups()
+    {
+        if (!Schema::hasTable('backup_runs')) {
+            return collect();
+        }
+
+        return BackupRun::orderByDesc('id')->limit(20)->get();
+    }
+
+    private function inspectExternalConnection(string $type): array
+    {
+        $config = $this->resolveSavedConnection($type);
+
+        if (empty($config['host']) || empty($config['database_name']) || empty($config['username'])) {
+            return [
+                'status' => 'failed',
+                'database_name' => $config['database_name'] ?? '-',
+                'schema_name' => $config['schema_name'] ?? 'public',
+                'tables_count' => 0,
+                'message' => ucfirst($type) . ' connection credentials are incomplete.',
+            ];
+        }
+
+        if (empty($config['password'])) {
+            return [
+                'status' => 'failed',
+                'database_name' => $config['database_name'] ?? '-',
+                'schema_name' => $config['schema_name'] ?? 'public',
+                'tables_count' => 0,
+                'message' => ucfirst($type) . ' database password is missing. Save the connection again or update the .env password.',
+            ];
+        }
+
+        $connectionName = 'temp_' . $type . '_backup';
+
         try {
-            if (!Schema::hasTable('sync_connections')) {
-                return [
-                    'status' => 'pending',
-                    'database_name' => '-',
-                    'schema_name' => 'public',
-                    'tables_count' => 0,
-                    'message' => 'sync_connections table not found.',
-                    'tables' => [],
-                ];
-            }
+            $this->registerTempConnection($connectionName, $config);
 
-            $connection = DB::table('sync_connections')
-                ->where('connection_type', $type)
-                ->where('is_active', true)
-                ->first();
-
-            if (!$connection) {
-                return [
-                    'status' => 'pending',
-                    'database_name' => '-',
-                    'schema_name' => 'public',
-                    'tables_count' => 0,
-                    'message' => ucfirst($type) . ' connection not configured.',
-                    'tables' => [],
-                ];
-            }
-
-            $password = '';
-            if (!empty($connection->password_encrypted)) {
-                $password = Crypt::decryptString($connection->password_encrypted);
-            }
-
-            $configName = 'temp_' . $type . '_backup';
-
-            config(["database.connections.$configName" => [
-                'driver' => 'pgsql',
-                'host' => $connection->host,
-                'port' => $connection->port,
-                'database' => $connection->database_name,
-                'username' => $connection->username,
-                'password' => $password,
-                'charset' => 'utf8',
-                'prefix' => '',
-                'prefix_indexes' => true,
-                'search_path' => $connection->schema_name,
-                'schema' => $connection->schema_name,
-                'sslmode' => $connection->sslmode ?: 'disable',
-            ]]);
-
-            DB::purge($configName);
-
-            $databaseResult = DB::connection($configName)->selectOne(
-                'select current_database() as database_name'
+            $dbRow = DB::connection($connectionName)->selectOne('select current_database() as database_name');
+            $schemaRow = DB::connection($connectionName)->selectOne('select current_schema() as schema_name');
+            $countRow = DB::connection($connectionName)->selectOne(
+                "select count(*) as total
+                 from information_schema.tables
+                 where table_schema = ?
+                 and table_type = 'BASE TABLE'",
+                [$config['schema_name']]
             );
-
-            $tableCountResult = DB::connection($configName)->selectOne(
-                'select count(*) as total from information_schema.tables where table_schema = ? and table_type = ?',
-                [$connection->schema_name, 'BASE TABLE']
-            );
-
-            DB::disconnect($configName);
-            DB::purge($configName);
 
             return [
                 'status' => 'connected',
-                'database_name' => $databaseResult->database_name ?? $connection->database_name,
-                'schema_name' => $connection->schema_name,
-                'tables_count' => (int) ($tableCountResult->total ?? 0),
+                'database_name' => $dbRow->database_name ?? $config['database_name'],
+                'schema_name' => $schemaRow->schema_name ?? $config['schema_name'],
+                'tables_count' => (int) ($countRow->total ?? 0),
                 'message' => ucfirst($type) . ' database connected successfully.',
-                'tables' => [],
             ];
         } catch (Throwable $e) {
             return [
                 'status' => 'failed',
-                'database_name' => '-',
-                'schema_name' => 'public',
+                'database_name' => $config['database_name'] ?? '-',
+                'schema_name' => $config['schema_name'] ?? 'public',
                 'tables_count' => 0,
                 'message' => $e->getMessage(),
-                'tables' => [],
             ];
+        } finally {
+            DB::disconnect($connectionName);
+            DB::purge($connectionName);
         }
     }
 
-    private function getAdminDbStatus(): array
+    private function inspectAdminConnection(): array
     {
         try {
-            $databaseRow = DB::selectOne('select current_database() as database_name');
+            $dbRow = DB::selectOne('select current_database() as database_name');
             $schemaRow = DB::selectOne('select current_schema() as schema_name');
-            $tableCountRow = DB::selectOne("
-                select count(*) as total
-                from information_schema.tables
-                where table_schema = current_schema()
-                and table_type = 'BASE TABLE'
-            ");
+            $countRow = DB::selectOne(
+                "select count(*) as total
+                 from information_schema.tables
+                 where table_schema = current_schema()
+                 and table_type = 'BASE TABLE'"
+            );
 
             return [
                 'status' => 'connected',
-                'database_name' => $databaseRow->database_name ?? env('DB_DATABASE', '-'),
+                'database_name' => $dbRow->database_name ?? env('DB_DATABASE', '-'),
                 'schema_name' => $schemaRow->schema_name ?? env('DB_SCHEMA', 'public'),
-                'tables_count' => (int) ($tableCountRow->total ?? 0),
+                'tables_count' => (int) ($countRow->total ?? 0),
                 'message' => 'Admin database connected successfully.',
-                'tables' => [],
             ];
         } catch (Throwable $e) {
             return [
                 'status' => 'failed',
-                'database_name' => '-',
+                'database_name' => env('DB_DATABASE', '-'),
                 'schema_name' => env('DB_SCHEMA', 'public'),
                 'tables_count' => 0,
                 'message' => $e->getMessage(),
-                'tables' => [],
             ];
         }
     }
 
-    private function safeGetTableData(string $table, string $orderBy = 'id', int $limit = 25)
+    private function resolveSavedConnection(string $type): array
     {
-        try {
-            if (!Schema::hasTable($table)) {
-                return collect();
-            }
+        $defaults = $type === 'source'
+            ? [
+                'name' => 'Source Supabase',
+                'connection_type' => 'source',
+                'host' => env('SRC_PG_HOST'),
+                'port' => env('SRC_PG_PORT', 5432),
+                'database_name' => env('SRC_PG_DATABASE', 'postgres'),
+                'username' => env('SRC_PG_USERNAME', 'postgres'),
+                'password' => env('SRC_PG_PASSWORD', ''),
+                'schema_name' => env('SRC_PG_SCHEMA', 'public'),
+                'sslmode' => env('SRC_PG_SSLMODE', 'require'),
+            ]
+            : [
+                'name' => 'Destination Database',
+                'connection_type' => 'destination',
+                'host' => env('DST_PG_HOST'),
+                'port' => env('DST_PG_PORT', 5432),
+                'database_name' => env('DST_PG_DATABASE', 'postgres'),
+                'username' => env('DST_PG_USERNAME', 'postgres'),
+                'password' => env('DST_PG_PASSWORD', ''),
+                'schema_name' => env('DST_PG_SCHEMA', 'public'),
+                'sslmode' => env('DST_PG_SSLMODE', 'disable'),
+            ];
 
-            return DB::table($table)
-                ->orderByDesc($orderBy)
-                ->limit($limit)
-                ->get();
-        } catch (Throwable $e) {
-            return collect();
+        if (!Schema::hasTable('sync_connections')) {
+            return $defaults;
         }
+
+        $record = DB::table('sync_connections')
+            ->where('connection_type', $type)
+            ->first();
+
+        if (!$record) {
+            return $defaults;
+        }
+
+        $password = $defaults['password'];
+
+        if (!empty($record->password_encrypted)) {
+            try {
+                $password = Crypt::decryptString($record->password_encrypted);
+            } catch (Throwable $e) {
+                $password = $defaults['password'];
+            }
+        } elseif (isset($record->password) && !empty($record->password)) {
+            $password = $record->password;
+        }
+
+        return [
+            'name' => $record->name ?? $defaults['name'],
+            'connection_type' => $record->connection_type ?? $type,
+            'host' => $record->host ?? $defaults['host'],
+            'port' => $record->port ?? $defaults['port'],
+            'database_name' => $record->database_name ?? $defaults['database_name'],
+            'username' => $record->username ?? $defaults['username'],
+            'password' => $password,
+            'schema_name' => $record->schema_name ?? $defaults['schema_name'],
+            'sslmode' => $record->sslmode ?? $defaults['sslmode'],
+        ];
     }
 
-    private function safeCount(string $table): int
+    private function registerTempConnection(string $connectionName, array $config): void
     {
-        try {
-            if (!Schema::hasTable($table)) {
-                return 0;
-            }
+        config([
+            "database.connections.$connectionName" => [
+                'driver' => 'pgsql',
+                'host' => $config['host'],
+                'port' => $config['port'],
+                'database' => $config['database_name'],
+                'username' => $config['username'],
+                'password' => $config['password'],
+                'charset' => 'utf8',
+                'prefix' => '',
+                'prefix_indexes' => true,
+                'search_path' => $config['schema_name'],
+                'schema' => $config['schema_name'],
+                'sslmode' => $config['sslmode'],
+            ],
+        ]);
 
-            return DB::table($table)->count();
-        } catch (Throwable $e) {
-            return 0;
-        }
-    }
-
-    private function safeCountWhere(string $table, string $column, string $value): int
-    {
-        try {
-            if (!Schema::hasTable($table) || !Schema::hasColumn($table, $column)) {
-                return 0;
-            }
-
-            return DB::table($table)->where($column, $value)->count();
-        } catch (Throwable $e) {
-            return 0;
-        }
+        DB::purge($connectionName);
     }
 }
