@@ -29,4 +29,9 @@ class DatabaseConnection extends Model
     protected $casts = [
         'is_active' => 'boolean',
     ];
-}
+
+    protected $hidden = [
+        'password',
+        'supabase_anon_key',
+    ];
+} 
