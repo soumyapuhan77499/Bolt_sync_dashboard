@@ -12,7 +12,7 @@ class DynamicDatabaseService
     {
         $connection = DatabaseConnection::where('connection_type', $type)
             ->where('status', 'active')
-            ->where('is_active', 1)
+            ->where('is_active', true)
             ->first();
 
         if (!$connection) {
@@ -20,7 +20,7 @@ class DynamicDatabaseService
         }
 
         Config::set("database.connections.{$runtimeName}", [
-            'driver' => $connection->driver,
+            'driver' => $connection->driver ?: 'pgsql',
             'host' => $connection->host,
             'port' => $connection->port,
             'database' => $connection->database_name,

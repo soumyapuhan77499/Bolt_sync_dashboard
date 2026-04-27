@@ -277,7 +277,8 @@
                 <div class="default-sidebar">
                     <div class="brand-box">
                         <h2>Bolt Sync Admin</h2>
-                        <p>Manage connections, schema sync, backups, health checks, and replication from one panel.</p>
+                        <p>Manage connections, schema sync, backups, health checks, replication, and database switching
+                            from one panel.</p>
                     </div>
 
                     <div class="nav-title">Navigation</div>
@@ -297,6 +298,15 @@
                                 <a href="{{ route('admin.connections.index') }}"
                                     class="{{ request()->routeIs('admin.connections.*') ? 'active' : '' }}">
                                     <span>Connections</span>
+                                </a>
+                            </li>
+                        @endif
+
+                        @if (Route::has('admin.database-connections.index'))
+                            <li>
+                                <a href="{{ route('admin.database-connections.index') }}"
+                                    class="{{ request()->routeIs('admin.database-connections.*') ? 'active' : '' }}">
+                                    <span>Database Connections</span>
                                 </a>
                             </li>
                         @endif
@@ -360,6 +370,15 @@
                                 <a href="{{ route('admin.audit.index') }}"
                                     class="{{ request()->routeIs('admin.audit.*') ? 'active' : '' }}">
                                     <span>Audit Logs</span>
+                                </a>
+                            </li>
+                        @endif
+
+                        @if (Route::has('admin.database-connections.index'))
+                            <li>
+                                <a href="{{ route('admin.database-connections.index') }}"
+                                    class="{{ request()->routeIs('admin.database-connections.*') ? 'active' : '' }}">
+                                    <span>Database Connections</span>
                                 </a>
                             </li>
                         @endif

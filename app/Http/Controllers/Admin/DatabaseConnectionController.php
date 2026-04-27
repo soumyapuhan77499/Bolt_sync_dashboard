@@ -4,7 +4,6 @@ namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Models\DatabaseConnection;
-use App\Services\DynamicDatabaseService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -17,7 +16,7 @@ class DatabaseConnectionController extends Controller
             ->orderBy('name')
             ->get();
 
-        return view('admin.database-connections.index', compact('connections'));
+        return view('admin.database_connections.index', compact('connections'));
     }
 
     public function activate(Request $request, $id)
@@ -25,10 +24,10 @@ class DatabaseConnectionController extends Controller
         $connection = DatabaseConnection::findOrFail($id);
 
         DatabaseConnection::where('connection_type', $connection->connection_type)
-            ->update(['is_active' => 0]);
+            ->update(['is_active' => false]);
 
         $connection->update([
-            'is_active' => 1,
+            'is_active' => true,
             'status' => 'active',
         ]);
 
@@ -40,20 +39,20 @@ class DatabaseConnectionController extends Controller
         $connection = DatabaseConnection::findOrFail($id);
 
         $connection->update([
-            'is_active' => 0,
+            'is_active' => false,
             'status' => 'inactive',
         ]);
 
         return back()->with('success', 'Database connection deactivated successfully.');
     }
 
-    public function test($id, DynamicDatabaseService $dynamicDatabaseService)
+    public function test($id)
     {
         $db = DatabaseConnection::findOrFail($id);
 
         config([
             'database.connections.temp_test_connection' => [
-                'driver' => $db->driver,
+                'driver' => $db->driver ?: 'pgsql',
                 'host' => $db->host,
                 'port' => $db->port,
                 'database' => $db->database_name,
@@ -72,8 +71,12 @@ class DatabaseConnectionController extends Controller
 
         try {
             $row = DB::connection('temp_test_connection')->selectOne('select current_database() as db');
+            DB::disconnect('temp_test_connection');
+
             return back()->with('success', 'Connected successfully to: ' . ($row->db ?? 'unknown'));
         } catch (\Throwable $e) {
+            DB::disconnect('temp_test_connection');
+
             return back()->with('error', 'Connection failed: ' . $e->getMessage());
         }
     }
