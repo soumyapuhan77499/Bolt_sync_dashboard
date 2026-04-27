@@ -12,6 +12,8 @@ use App\Http\Controllers\Admin\AuditLogController;
 use App\Http\Controllers\Admin\SyncJobController;
 use App\Http\Controllers\Admin\ReplicationController;
 use App\Http\Controllers\Admin\DataCompareController;
+use App\Http\Controllers\Admin\DatabaseConnectionController;
+
 
 Route::redirect('/', '/admin/login');
 
@@ -48,6 +50,13 @@ Route::prefix('admin')->name('admin.')->group(function () {
         Route::prefix('data-compare')->name('data-compare.')->group(function () {
             Route::get('/', [DataCompareController::class, 'index'])->name('index');
             Route::post('/run', [DataCompareController::class, 'run'])->name('run');
+        });
+
+        Route::prefix('database-connections')->name('database-connections.')->group(function () {
+            Route::get('/', [DatabaseConnectionController::class, 'index'])->name('index');
+            Route::post('/activate/{id}', [DatabaseConnectionController::class, 'activate'])->name('activate');
+            Route::post('/deactivate/{id}', [DatabaseConnectionController::class, 'deactivate'])->name('deactivate');
+            Route::post('/test/{id}', [DatabaseConnectionController::class, 'test'])->name('test');
         });
 
         Route::get('/backup', [BackupController::class, 'index'])->name('backup.index');
